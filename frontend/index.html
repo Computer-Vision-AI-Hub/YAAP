@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YAAP — Yet Another Annotation Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/yaap.css">
+<link rel="icon" type="image/png" href="/static/img/favicon.png">
+</head>
+<body>
+
+<div class="watermark" aria-hidden="true">
+  <div class="wm-title">yet another annotation platform</div>
+  <div class="wm-sub">powered by ComputerVisionAIHub</div>
+</div>
+
+<header class="topbar">
+  <div class="brand" id="brand">
+    <img class="brand-logo" src="/static/img/yaap-logo.png" alt="YAAP" width="30" height="30">
+    <span class="brand-name">YAAP</span>
+    <span class="brand-sub1">yet another annotation platform</span>
+    <span class="brand-sub2">by ComputerVisionAIHub</span>
+  </div>
+  <div class="topbar-mid" id="topbarMid"></div>
+  <div class="topbar-right">
+    <span class="chip mono" id="deviceChip" title="Compute device">…</span>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="rail" id="rail" hidden>
+    <button class="rail-btn" id="homeBtn" title="All projects"><span class="rb-ico">🏠</span>Projects</button>
+    <button class="rail-btn" data-view="upload"   title="Upload (U)"><span class="rb-ico">⬆</span>Upload</button>
+    <button class="rail-btn" data-view="annotate" title="Annotate (A)"><span class="rb-ico">✎</span>Annotate</button>
+    <button class="rail-btn" data-view="review"   title="Project home"><span class="rb-ico">✓</span>Home</button>
+    <button class="rail-btn" data-view="classes"  title="Classes"><span class="rb-ico">▣</span>Classes</button>
+    <button class="rail-btn" data-view="autolabel" title="Model-assisted labeling"><span class="rb-ico">⚛</span>Auto-label</button>
+    <button class="rail-btn" data-view="generate" title="Generate dataset version"><span class="rb-ico">⚙</span>Generate</button>
+    <button class="rail-btn" data-view="versions" title="Versions & export"><span class="rb-ico">⬇</span>Versions</button>
+    <button class="rail-btn" data-view="train"    title="Train with ultralytics"><span class="rb-ico">▶</span>Train</button>
+  </nav>
+  <main class="stage" id="stage"><!-- views render here --></main>
+</div>
+
+<div class="toast-host" id="toastHost"></div>
+<dialog id="modal"><div id="modalBody"></div></dialog>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/editor.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

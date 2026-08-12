@@ -1,0 +1,57 @@
+# YAAP — local-first deployment. GPU is the default:
+#
+#   docker compose up --build            → GPU (NVIDIA), http://127.0.0.1:8811
+#   docker compose --profile cpu up yaap-cpu --build   → CPU fallback
+#
+# The UI binds to 127.0.0.1 only — it is NOT reachable from the network.
+# All data persists in ./data (and ./seg_models) on the host, owned by the
+# UID/GID below rather than root — set these to your `id -u`/`id -g` if they
+# differ from the default 1000/1000 before building.
+
+services:
+  yaap:
+    build:
+      context: .
+      target: gpu
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    image: yaap:gpu
+    container_name: yaap
+    ports:
+      - "127.0.0.1:8811:8811"     # localhost only — change to "8811:8811" for LAN access
+    volumes:
+      - ./data:/app/data
+      - ./seg_models:/app/seg_models
+    restart: unless-stopped
+    shm_size: "8gb"               # DataLoader workers need shared memory
+    environment:
+      # Download these once at first start, then the container can run air-gapped.
+      # Set to "" to disable all downloads (upload .pt files through the UI instead).
+      PRELOAD_MODELS: "sam3.pt yolo11n.pt"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  yaap-cpu:
+    profiles: ["cpu"]
+    build:
+      context: .
+      target: cpu
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    image: yaap:cpu
+    container_name: yaap-cpu
+    ports:
+      - "127.0.0.1:8811:8811"
+    volumes:
+      - ./data:/app/data
+      - ./seg_models:/app/seg_models
+    restart: unless-stopped
+    environment:
+      PRELOAD_MODELS: "sam3.pt"

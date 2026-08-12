@@ -1,0 +1,64 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from ..db import DatasetVersion, TrainJob, get_db
+from ..schemas import TrainRequest
+from ..services import trainer
+from .projects import project_or_404
+
+router = APIRouter(prefix="/api/projects/{pid}/train", tags=["training"])
+
+
+def serialize_job(j: TrainJob) -> dict:
+    return {"id": j.id, "version_id": j.version_id, "model_arch": j.model_arch,
+            "status": j.status, "weights_path": j.weights_path,
+            "created_at": j.created_at.isoformat()}
+
+
+@router.get("")
+def list_jobs(pid: int, db: Session = Depends(get_db)):
+    jobs = db.query(TrainJob).filter_by(project_id=pid).order_by(TrainJob.id.desc()).all()
+    return [serialize_job(trainer.refresh_status(db, j)) for j in jobs]
+
+
+@router.post("")
+def start_training(pid: int, req: TrainRequest, db: Session = Depends(get_db)):
+    p = project_or_404(db, pid)
+    v = db.get(DatasetVersion, req.version_id)
+    if not v or v.project_id != pid:
+        raise HTTPException(404, "Version not found")
+    if v.status != "ready":
+        raise HTTPException(400, f"Version is '{v.status}' — wait until it is ready.")
+    try:
+        job = trainer.start(db, p, v, req)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    return serialize_job(job)
+
+
+@router.get("/{jid}/log")
+def job_log(pid: int, jid: int, lines: int = 100, db: Session = Depends(get_db)):
+    j = _job(db, pid, jid)
+    trainer.refresh_status(db, j)
+    return {"status": j.status, "log": trainer.tail(j, lines)}
+
+
+@router.post("/{jid}/stop")
+def stop_job(pid: int, jid: int, db: Session = Depends(get_db)):
+    j = _job(db, pid, jid)
+    trainer.stop(db, j)
+    return serialize_job(j)
+
+
+@router.delete("/{jid}")
+def delete_job(pid: int, jid: int, db: Session = Depends(get_db)):
+    j = _job(db, pid, jid)
+    trainer.delete(db, j)
+    return {"ok": True}
+
+
+def _job(db: Session, pid: int, jid: int) -> TrainJob:
+    j = db.get(TrainJob, jid)
+    if not j or j.project_id != pid:
+        raise HTTPException(404, "Job not found")
+    return j

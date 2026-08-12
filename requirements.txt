@@ -1,0 +1,24 @@
+# ── YAAP — Yet Another Annotation Platform ──────────────────────────
+# Core web stack
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+sqlalchemy>=2.0
+pydantic>=2.7
+aiofiles>=23.2
+
+# Imaging / augmentation
+pillow>=10.3
+opencv-python-headless>=4.9
+numpy>=1.26
+albumentations>=2.0
+pyyaml>=6.0
+
+# Deep learning (GPU builds of torch: see README — install the CUDA wheel first)
+torch>=2.2
+torchvision>=0.17
+ultralytics>=8.3.0        # YOLOv8 / YOLO11 / YOLO26, detect + segment + classify
+timm>=1.0.0               # SAM 3 backbone — avoids ultralytics' runtime auto-install
+
+# Optional — Roboflow's RF-DETR (detection). Uncomment to enable:
+# rfdetr>=1.0
