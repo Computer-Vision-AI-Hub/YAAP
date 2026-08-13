@@ -32,7 +32,7 @@
   --maxw: 1080px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html{scroll-behavior:smooth}
+html{scroll-behavior:smooth;scroll-padding-top:80px}
 body{background:var(--bg);color:var(--text);font-family:var(--font-body);
   font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}
 img{max-width:100%;display:block}
@@ -43,7 +43,7 @@ a{color:inherit}
 section{padding:76px 0}
 h1,h2,h3{font-family:var(--font-body);font-weight:800;letter-spacing:-.01em}
 .eyebrow{font-family:var(--font-mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
-  color:var(--teal);margin-bottom:10px}
+  color:var(--amber);margin-top:14px;margin-bottom:10px}
 h2.section-title{font-size:clamp(24px,3.4vw,34px);margin-bottom:10px;color:var(--text)}
 p.section-sub{color:var(--muted);max-width:640px;margin-bottom:36px;font-size:16px}
 code,.mono{font-family:var(--font-mono)}
@@ -154,9 +154,9 @@ code,.mono{font-family:var(--font-mono)}
 
 /* SAM spotlight */
 .sam-box{background:var(--panel);border:1.5px solid #1c6b64;box-shadow:0 0 0 1px rgba(34,211,199,.12);
-  border-radius:14px;padding:32px;display:grid;grid-template-columns:1.1fr .9fr;gap:30px;align-items:center}
+  border-radius:14px;padding:32px;margin-top:36px;display:grid;grid-template-columns:1.1fr .9fr;gap:30px;align-items:center}
 @media (max-width:800px){.sam-box{grid-template-columns:1fr}}
-.sam-box h3{color:var(--teal);font-size:22px;margin-bottom:12px}
+.sam-box h3{color:var(--amber);font-size:22px;margin-bottom:12px}
 .sam-box p{color:var(--muted);font-size:14.5px;margin-bottom:10px}
 .sam-box .sym{font-size:34px;color:var(--teal);margin-bottom:14px}
 .prompt-table{width:100%;border-collapse:collapse;font-size:13.5px}
@@ -164,6 +164,12 @@ code,.mono{font-family:var(--font-mono)}
   text-transform:uppercase;letter-spacing:.06em;padding-bottom:10px;border-bottom:1px solid var(--line)}
 .prompt-table td{padding:12px 0;border-bottom:1px solid var(--line-soft);color:var(--muted);vertical-align:top}
 .prompt-table td:first-child{color:var(--teal);font-weight:700;white-space:nowrap;padding-right:16px}
+.sam-warn{grid-column:1/-1;display:flex;gap:12px;align-items:flex-start;
+  background:rgba(232,185,60,.06);border:1px solid var(--amber-dim);border-radius:10px;
+  padding:14px 16px;margin-top:4px}
+.sam-warn .ico{font-size:15px;flex:0 0 auto;line-height:1.5}
+.sam-warn p{color:var(--muted);font-size:13px;margin:0}
+.sam-warn a{color:var(--amber);text-decoration:underline}
 
 /* workflow timeline */
 .timeline{display:flex;flex-direction:column;gap:0;counter-reset:step}
@@ -190,9 +196,9 @@ code,.mono{font-family:var(--font-mono)}
 .cvaih{display:flex;align-items:center;gap:28px;background:var(--panel);border:1px solid var(--line);
   border-radius:14px;padding:30px}
 @media (max-width:700px){.cvaih{flex-direction:column;text-align:center}}
-.cvaih-logo{flex:0 0 auto;width:104px;height:104px;border-radius:14px;border:2px dashed var(--line);
-  display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:11px;
-  font-family:var(--font-mono);text-align:center;padding:8px}
+.cvaih-logo{flex:0 0 auto;width:128px;height:128px;border-radius:24px;overflow:hidden;
+  border:1px solid var(--line);background:var(--panel-2)}
+.cvaih-logo img{width:100%;height:100%;object-fit:cover;display:block}
 .cvaih-body h3{font-size:18px;margin-bottom:8px}
 .cvaih-body p{color:var(--muted);font-size:14px;margin-bottom:14px}
 
@@ -235,7 +241,7 @@ footer .fine a{color:var(--muted);text-decoration:underline}
       <a href="#screenshots">Screenshots</a>
     </div>
     <div class="nav-cta">
-      <a class="btn small" href="https://github.com/lukasiktar/YAAP" target="_blank" rel="noopener">GitHub</a>
+      <a class="btn small" href="https://github.com/Computer-Vision-AI-Hub/YAAP" target="_blank" rel="noopener">GitHub</a>
       <a class="btn small primary" href="https://hub.docker.com/r/lukasiktar/yaap" target="_blank" rel="noopener">Docker Hub</a>
     </div>
   </div>
@@ -247,13 +253,14 @@ footer .fine a{color:var(--muted);text-decoration:underline}
     <h1>Yet Another <span class="hl">Annotation</span> Platform</h1>
     <p class="tag">A free, <b>local, open-source</b> computer-vision annotation platform. Segment
       with <b>SAM 3</b>, auto-label with YOLO / RT-DETR, augment, version, and export as
-      <b>YOLO</b> or <b>COCO</b> — then train on your own GPU. Nothing ever leaves your machine.</p>
+      <b>YOLO</b> or <b>COCO</b> — then train on your own GPU. Nothing ever leaves your machine.
+      The core idea behind YAAP: <b>everything runs on your own machine.</b></p>
     <div class="ctas">
       <a class="btn primary" href="#get-it">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v14m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
         Get started
       </a>
-      <a class="btn" href="https://github.com/lukasiktar/YAAP" target="_blank" rel="noopener">
+      <a class="btn" href="https://github.com/Computer-Vision-AI-Hub/YAAP" target="_blank" rel="noopener">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.36 1.09 2.93.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.4 9.4 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></svg>
         View on GitHub
       </a>
@@ -309,7 +316,7 @@ footer .fine a{color:var(--muted);text-decoration:underline}
         <p class="desc">Clone the repo and build locally with Docker Compose — GPU by default, CPU fallback profile included.</p>
         <div class="code-block">
           <pre><span class="cm"># clone</span>
-git clone https://github.com/lukasiktar/YAAP
+git clone https://github.com/Computer-Vision-AI-Hub/YAAP
 <span class="cm">cd</span> YAAP
 
 <span class="cm"># GPU (needs NVIDIA driver + nvidia-container-toolkit)</span>
@@ -317,11 +324,11 @@ docker compose up --build
 
 <span class="cm"># CPU fallback</span>
 docker compose --profile cpu up --build yaap-cpu</pre>
-          <button class="copy-btn" data-copy="git clone https://github.com/lukasiktar/YAAP
+          <button class="copy-btn" data-copy="git clone https://github.com/Computer-Vision-AI-Hub/YAAP
 cd YAAP
 docker compose up --build">copy</button>
         </div>
-        <div class="foot-link">Open <code class="mono">http://127.0.0.1:8811</code> once it's up. Full setup notes in the <a href="https://github.com/lukasiktar/YAAP#readme" target="_blank" rel="noopener">README</a>.</div>
+        <div class="foot-link">Open <code class="mono">http://127.0.0.1:8811</code> once it's up. Full setup notes in the <a href="https://github.com/Computer-Vision-AI-Hub/YAAP#readme" target="_blank" rel="noopener">README</a>.</div>
       </div>
 
       <div class="get-card">
@@ -370,7 +377,7 @@ docker run -d --name yaap-cpu \
       </div>
     </div>
 
-    <p class="bare-note">Prefer bare Python? <code class="mono">pip install -r requirements.txt && python run.py</code> — see the <a href="https://github.com/lukasiktar/YAAP#quick-start--bare-python" target="_blank" rel="noopener">README</a> for the CUDA-matched torch install step.</p>
+    <p class="bare-note">Prefer bare Python? <code class="mono">pip install -r requirements.txt && python run.py</code> — see the <a href="https://github.com/Computer-Vision-AI-Hub/YAAP#quick-start--bare-python" target="_blank" rel="noopener">README</a> for the CUDA-matched torch install step.</p>
   </section>
 
   <section class="wrap" id="features">
@@ -407,6 +414,14 @@ docker run -d --name yaap-cpu \
         <tr><td>Box</td><td>Drag a rough rectangle around the object.</td></tr>
         <tr><td>Reject</td><td><code class="mono">Esc</code> discards the predicted mask with no trace left behind.</td></tr>
       </table>
+      <div class="sam-warn">
+        <span class="ico">⚠️</span>
+        <p><b style="color:var(--text)">SAM 3 weights are gated by Meta</b> — they don't auto-download like the
+          YOLO/RT-DETR weights do. Request access on the
+          <a href="https://huggingface.co/facebook/sam3" target="_blank" rel="noopener">SAM 3 Hugging Face page</a>,
+          wait for approval, then authenticate with <code class="mono">hf auth login</code> before first use
+          (or download the checkpoint yourself once approved and drop it into <code class="mono">seg_models/</code>).</p>
+      </div>
     </div>
   </section>
 
@@ -441,7 +456,7 @@ docker run -d --name yaap-cpu \
 
   <section class="wrap">
     <div class="cvaih">
-      <div class="cvaih-logo">CVAIH<br>logo</div>
+      <div class="cvaih-logo"><img src="img/cvaih-logo.png" alt="ComputerVisionAIHub logo"></div>
       <div class="cvaih-body">
         <h3>Built by ComputerVisionAIHub</h3>
         <p>YAAP is part of ComputerVisionAIHub's open-source computer-vision tooling. Check out the
@@ -460,24 +475,24 @@ docker run -d --name yaap-cpu \
         <p class="fine">MIT © ComputerVisionAIHub. YAAP's own code is MIT — its ML backbone
           (<code class="mono">ultralytics</code>, powering YOLO, RT-DETR and SAM) is AGPL-3.0,
           and SAM weights carry their own license. See
-          <a href="https://github.com/lukasiktar/YAAP/blob/main/THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener">THIRD_PARTY_NOTICES</a>
+          <a href="https://github.com/Computer-Vision-AI-Hub/YAAP/blob/main/THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener">THIRD_PARTY_NOTICES</a>
           before commercial use.</p>
       </div>
       <div class="foot-links">
         <div>
           <h4>Project</h4>
           <ul>
-            <li><a href="https://github.com/lukasiktar/YAAP" target="_blank" rel="noopener">GitHub</a></li>
+            <li><a href="https://github.com/Computer-Vision-AI-Hub/YAAP" target="_blank" rel="noopener">GitHub</a></li>
             <li><a href="https://hub.docker.com/r/lukasiktar/yaap" target="_blank" rel="noopener">Docker Hub</a></li>
-            <li><a href="https://github.com/lukasiktar/YAAP/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
-            <li><a href="https://github.com/lukasiktar/YAAP/blob/main/DOCUMENTATION.md" target="_blank" rel="noopener">Full documentation</a></li>
+            <li><a href="https://github.com/Computer-Vision-AI-Hub/YAAP/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
+            <li><a href="https://github.com/Computer-Vision-AI-Hub/YAAP/blob/main/DOCUMENTATION.md" target="_blank" rel="noopener">Full documentation</a></li>
           </ul>
         </div>
         <div>
           <h4>Hub</h4>
           <ul>
             <li><a href="https://computer-vision-ai-hub.github.io/ComputerVisionAIHub.github.io/" target="_blank" rel="noopener">ComputerVisionAIHub</a></li>
-            <li><a href="https://github.com/lukasiktar/YAAP/blob/main/LICENSE" target="_blank" rel="noopener">License</a></li>
+            <li><a href="https://github.com/Computer-Vision-AI-Hub/YAAP/blob/main/LICENSE" target="_blank" rel="noopener">License</a></li>
           </ul>
         </div>
       </div>
