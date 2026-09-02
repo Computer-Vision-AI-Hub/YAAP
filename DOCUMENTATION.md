@@ -256,20 +256,23 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
     the rest with a fixed seed for reproducibility), preprocess every image once, and for
     the train split only, additionally generate `multiplier - 1` augmented variants
     (**val/test never get the augment pipeline** — only `build_preprocess`). The
-    preprocessing/augmentation pipeline runs identically regardless of output format —
-    only the label-writing step at the end of the per-image loop branches on
-    `config["format"]`:
-    - `"yolo"` (default) — `images/`+`labels/` per split (or class-per-folder for
-      classify) plus a `data.yaml`, the layout YOLO/RT-DETR training via ultralytics
-      expects.
-    - `"coco"` — detect/segment only (`generate()` raises early for classify). Images sit
-      directly in the split folder alongside one `_annotations.coco.json`
-      (`_write_coco_json()`), matching the Roboflow-style layout that pycocotools,
-      HuggingFace `transformers`, detectron2, and Roboflow's own `rfdetr` training script
-      all expect out of the box. Bbox annotations get `segmentation: []`; polygon
-      annotations get a flattened single-ring `segmentation` plus their enclosing
-      rectangle as `bbox` (`_coco_ann()`). Category ids are 1-based, matching COCO
-      convention.
+    preprocessing/augmentation pipeline runs identically regardless of output format.
+    detect/segment tasks always get the `images/`+`labels/` per-split layout plus a
+    `data.yaml` — the layout YOLO/RT-DETR training via ultralytics expects, written
+    unconditionally so every version is trainable in-platform regardless of
+    `config["format"]`. classify tasks always use class-per-folder instead (no format
+    choice — `generate()` raises early if `format == "coco"` for a classify project).
+    `config["format"] == "coco"` additionally writes, per split, one flat copy of the
+    images alongside a single `_annotations.coco.json` (`_write_coco_json()`) —
+    matching the Roboflow-style layout that pycocotools, HuggingFace `transformers`,
+    detectron2, and Roboflow's own `rfdetr` training script all expect out of the box.
+    Bbox annotations get `segmentation: []`; polygon annotations get a flattened
+    single-ring `segmentation` plus their enclosing rectangle as `bbox`
+    (`_coco_ann()`). Category ids are 1-based, matching COCO convention. This is a
+    second, parallel layout, not a replacement — a `"coco"` version's `data.yaml` is
+    identical to a `"yolo"` version's, so `"coco"` is strictly additive: images end up
+    written twice (once under `<split>/images/`, once flat under `<split>/`) since the
+    two layouts disagree on where the image sits.
 
     Either way, zips the whole version folder and returns stats including `images` (files
     written, augmented copies included), `source_images`/`source_images_total` (distinct

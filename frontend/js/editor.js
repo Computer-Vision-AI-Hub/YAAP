@@ -47,6 +47,7 @@ class Editor {
   }
 
   setTool(t) {
+    if (t !== this.tool) this.select(-1);   // switching tools ends any in-progress edit
     this.tool = t; this.poly = null; this.draft = null;
     if (t !== "sam") this.clearSam(false);
     this.draw();
@@ -128,12 +129,14 @@ class Editor {
           if (h.mode === "vertex") Object.assign(this.drag, { downSx: sx, downSy: sy, moved: false });
           return;
         }
-        // 1b) click on an edge of the selected polygon → insert a vertex there
+        // 1b) click on an edge of the selected polygon → insert a vertex there,
+        // and let an immediate drag (no mouseup yet) carry it right away
         const a = this.anns[this.sel];
         if (a && a.kind === "polygon") {
           const at = this._hitEdge(sx, sy);
           if (at !== null) {
             a.data.points.splice(at, 0, [this._clampX(ix), this._clampY(iy)]);
+            this.drag = { mode: "vertex", i: at, downSx: sx, downSy: sy, moved: false, inserted: true };
             this._dirty();
             this.draw();
             return;
@@ -216,9 +219,12 @@ class Editor {
       }
     }
     if (this.drag && this.drag.mode === "vertex" && !this.drag.moved) {
-      // plain click on a vertex (no drag) → remove it, never below a triangle
-      const a = this.anns[this.sel];
-      if (a && a.data.points.length > 3) { a.data.points.splice(this.drag.i, 1); this._dirty(); }
+      // plain click on a pre-existing vertex (no drag) → remove it, never below a
+      // triangle; a freshly-inserted vertex (edge click) is left in place instead
+      if (!this.drag.inserted) {
+        const a = this.anns[this.sel];
+        if (a && a.data.points.length > 3) { a.data.points.splice(this.drag.i, 1); this._dirty(); }
+      }
       this.drag = null;
       this.draw();
       return;
@@ -256,7 +262,7 @@ class Editor {
       if (cls) {
         this.anns.push({ class_id: cls.id, kind: "polygon", source: "manual",
           confidence: 1, data: { points: this.poly } });
-        this.select(this.anns.length - 1);
+        this.select(-1);           // labeled and done — don't leave it selected/editable
         this._dirty();
       }
     }
@@ -374,7 +380,19 @@ class Editor {
     ctx.restore();
 
     // annotations (drawn in screen space for crisp 1px lines)
-    this.anns.forEach((a, i) => this._drawAnn(a, i === this.sel));
+    // while actively drawing something new, hide labels (they clutter the
+    // image) except on the annotation currently under the pointer
+    const hideTags = this.tool === "sam" || this.tool === "polygon" || this.tool === "bbox";
+    const hoverIdx = hideTags ? this._hitAnn(this.mouse.ix, this.mouse.iy) : -1;
+    // number same-named labels — "cat (1)", "cat (2)" — only when there's more than one
+    const classCounts = {};
+    this.anns.forEach(a => { classCounts[a.class_id] = (classCounts[a.class_id] || 0) + 1; });
+    const classSeen = {};
+    this.anns.forEach((a, i) => {
+      let idx = null;
+      if (classCounts[a.class_id] > 1) idx = classSeen[a.class_id] = (classSeen[a.class_id] || 0) + 1;
+      this._drawAnn(a, i === this.sel, idx, hideTags && i !== hoverIdx);
+    });
     if (this.draft) this._drawDraft();
     if (this.poly) this._drawPolyDraft();
     this._drawSam();
@@ -382,7 +400,7 @@ class Editor {
          (this.tool === "sam" && !this.samPending.length)) && !this.mouse.down) this._drawCrosshair();
   }
 
-  _drawAnn(a, selected) {
+  _drawAnn(a, selected, idx, hideTag) {
     const ctx = this.ctx, cls = this.classOf(a);
     const color = cls ? cls.color : "#999";
     ctx.lineWidth = selected ? 2.5 : 1.6;
@@ -393,22 +411,23 @@ class Editor {
       const [x, y] = this.toScr(a.data.x, a.data.y);
       const w = a.data.w * this.view.s, h = a.data.h * this.view.s;
       ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
-      this._tag(x, y, cls, a);
+      if (!hideTag) this._tag(x, y, cls, a, idx);
       if (selected) for (const [, hx, hy] of this._handles(a.data)) this._knob(...this.toScr(hx, hy), color);
     } else if (a.kind === "polygon") {
       const pts = a.data.points.map(p => this.toScr(p[0], p[1]));
       ctx.beginPath();
       pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
       ctx.closePath(); ctx.fill(); ctx.stroke();
-      this._tag(pts[0][0], pts[0][1], cls, a);
+      if (!hideTag) this._tag(pts[0][0], pts[0][1], cls, a, idx);
       if (selected) pts.forEach(([x, y]) => this._knob(x, y, color));
     }
   }
 
-  _tag(x, y, cls, a) {
+  _tag(x, y, cls, a, idx) {
     if (!cls || this.view.s * this.img.width < 120) return;
     const ctx = this.ctx;
-    const label = cls.name + (a.source === "model" ? ` ·${Math.round(a.confidence * 100)}%` : "");
+    const label = cls.name + (idx ? ` (${idx})` : "") +
+      (a.source === "model" ? ` ·${Math.round(a.confidence * 100)}%` : "");
     ctx.font = "10px 'IBM Plex Mono', monospace";
     const w = ctx.measureText(label).width + 10;
     ctx.fillStyle = cls.color;

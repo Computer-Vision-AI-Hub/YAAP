@@ -1,19 +1,23 @@
 """Dataset version generation.
 
-Two output formats, chosen per version (`config["format"]`):
-
-yolo (default) — ultralytics-ready, for YOLO/RT-DETR/RF-DETR training:
+detect/segment tasks always get the ultralytics-ready YOLO layout — needed
+for in-platform YOLO/RT-DETR training regardless of `config["format"]`:
     v<id>/
       data.yaml
       train/images  train/labels   (+ val/, test/)
-classify tasks always use this folder layout regardless of format:
+classify tasks always use this folder layout instead (no format choice):
     v<id>/
       train/<class_name>/*.jpg     (+ val/, test/)
 
-coco — detect/segment only, Roboflow-style layout most COCO-consuming tools
+`config["format"] == "coco"` adds a second, parallel layout alongside the
+YOLO one — Roboflow-style, matching what most COCO-consuming tools
 (pycocotools, HuggingFace transformers, detectron2) expect out of the box:
     v<id>/
       train/_annotations.coco.json  train/*.jpg   (+ val/, test/)
+
+So a "coco" version is trainable in-platform (via the YOLO layout it also
+contains) *and* exportable for external COCO-based tooling — pick "coco"
+whenever you might want either, not just when you're leaving the platform.
 
 A .zip sits next to the folder for one-click download either way.
 """
@@ -167,7 +171,7 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
     for split, ims in split_map.items():
         if not ims:
             continue
-        if task == "classify" or fmt == "coco":
+        if task == "classify":
             (out_dir / split).mkdir(parents=True, exist_ok=True)
         else:
             (out_dir / split / "images").mkdir(parents=True, exist_ok=True)
@@ -195,12 +199,6 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
                     cdir = out_dir / split / cname
                     cdir.mkdir(parents=True, exist_ok=True)
                     cv2.imwrite(str(cdir / f"{stem}.jpg"), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                elif fmt == "coco":
-                    oh, ow = out_img.shape[:2]
-                    cv2.imwrite(str(out_dir / split / f"{stem}.jpg"), out_img,
-                                [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    coco_entries[split].append((stem, ow, oh, out_anns))
-                    ann_count += len(out_anns)
                 else:
                     oh, ow = out_img.shape[:2]
                     cv2.imwrite(str(out_dir / split / "images" / f"{stem}.jpg"), out_img,
@@ -208,13 +206,13 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
                     _write_label_txt(out_dir / split / "labels" / f"{stem}.txt",
                                      out_anns, class_idx, ow, oh, task)
                     ann_count += len(out_anns)
+                    if fmt == "coco":                     # parallel Roboflow-style layout
+                        cv2.imwrite(str(out_dir / split / f"{stem}.jpg"), out_img,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        coco_entries[split].append((stem, ow, oh, out_anns))
                 counts[split] += 1
 
-    if fmt == "coco":
-        for split, entries in coco_entries.items():
-            if entries:
-                _write_coco_json(out_dir / split / "_annotations.coco.json", entries, classes, class_idx)
-    elif task != "classify":
+    if task != "classify":
         data_yaml = {
             "path": str(out_dir.resolve()),
             "train": "train/images", "val": "val/images",
@@ -225,6 +223,11 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
         if not counts.get("val") and counts.get("train"):
             data_yaml["val"] = "train/images"             # ultralytics needs a val set
         (out_dir / "data.yaml").write_text(yaml.safe_dump(data_yaml, sort_keys=False))
+
+    if fmt == "coco":
+        for split, entries in coco_entries.items():
+            if entries:
+                _write_coco_json(out_dir / split / "_annotations.coco.json", entries, classes, class_idx)
 
     zip_path = out_dir.with_suffix(".zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:

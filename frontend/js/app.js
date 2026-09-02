@@ -899,7 +899,7 @@ async function viewGenerate() {
       <h3 class="sect">Export format</h3>
       <select class="input" id="genFormat" style="max-width:360px">
         <option value="yolo">YOLO — data.yaml + txt labels, for YOLO / RT-DETR via ultralytics</option>
-        <option value="coco">COCO — _annotations.coco.json per split, for RF-DETR / HuggingFace / detectron2</option>
+        <option value="coco">YOLO + COCO — adds _annotations.coco.json per split, for RF-DETR / HuggingFace / detectron2 (still trainable in-platform)</option>
       </select>`}
       <h3 class="sect">Split</h3>
       <div class="row">
@@ -1036,7 +1036,7 @@ async function viewVersions() {
       const st = v.stats || {}, src = st.source_images || {}, total = st.source_images_total ?? 0;
       const pct = n => total ? Math.round((n / total) * 100) : 0;
       const meta = v.status === "ready"
-        ? `${(st.format || "yolo").toUpperCase()} · ${total} image(s) · train ${src.train ?? 0} (${pct(src.train ?? 0)}%) · ` +
+        ? `${st.format === "coco" ? "YOLO+COCO" : "YOLO"} · ${total} image(s) · train ${src.train ?? 0} (${pct(src.train ?? 0)}%) · ` +
           `val ${src.val ?? 0} (${pct(src.val ?? 0)}%) · test ${src.test ?? 0} (${pct(src.test ?? 0)}%)` +
           (st.annotations != null ? ` · ${st.annotations} labels` : "") : (st.error || "");
       return `<div class="v-row">
