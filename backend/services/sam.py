@@ -4,7 +4,6 @@ Prompts supported:
     point(s)  — positive / negative clicks
     box       — rough rectangle around the object
 
-Backend (lazy, cached): ultralytics SAM wrapper — sam3.pt, sam2.1_b/t, mobile_sam.
 
 Every mask is converted to a simplified polygon in image pixel coordinates so
 the frontend can hand it to the editor as a normal annotation. Conversion to
@@ -106,8 +105,9 @@ def predict(image_path: str, model_name: str, prompt: dict, device: str = "auto"
         pts = prompt.get("points") or []
         if not pts:
             raise SamError("Point prompt needs at least one click.")
-        kwargs["points"] = [[float(x), float(y)] for x, y in pts]
-        kwargs["labels"] = [int(v) for v in (prompt.get("labels") or [1] * len(pts))]
+        labels = [int(v) for v in (prompt.get("labels") or [1] * len(pts))]
+        kwargs["points"] = [[[float(x), float(y)] for x, y in pts]]
+        kwargs["labels"] = [labels]
     elif ptype == "box":
         box = prompt.get("box")
         if not box or len(box) != 4:

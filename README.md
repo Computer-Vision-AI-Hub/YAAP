@@ -87,6 +87,39 @@ GPU prerequisites on the host:
    (`sudo apt install nvidia-container-toolkit && sudo systemctl restart docker`)
 3. Verify: `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi`
 
+### No repo checkout? Use the pre-built image + portable launcher
+
+If you just want to run YAAP on a device without cloning the source, grab
+the single file
+[`docs/yaap-portable-launch.sh`](docs/yaap-portable-launch.sh) and run
+it once. Two ways to get it — pick whichever you'd rather depend on:
+
+```bash
+# Docker Hub only, no GitHub involved — the script ships inside the image
+docker run --rm lukasiktar/yaap:cpu cat /opt/yaap-portable-launch.sh > yaap-portable-launch.sh
+
+# or via GitHub Pages
+curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
+```
+
+```bash
+bash yaap-portable-launch.sh
+```
+
+(The Docker Hub extraction deliberately uses the `:cpu` tag even if you'll
+run GPU YAAP — it's ~2GB instead of ~10GB, just to fetch a 4KB script, and
+its plain Python base has no wrapping entrypoint. The GPU image's NVIDIA
+base injects a CUDA license banner into anything you run through it, which
+would otherwise corrupt the extracted file — the launcher itself decides
+GPU vs CPU separately once it actually runs.)
+
+On first run it auto-detects GPU vs CPU (`nvidia-smi` present or not), writes
+a `docker-compose.yml` + data folders under `~/YAAP`, installs a YAAP desktop
+shortcut (app launcher + Desktop icon) pointing at itself, starts the
+container, and opens the browser. From then on, just click the icon —
+re-running the script is idempotent and won't touch anything you edit by
+hand afterward (e.g. if you swap in a different image tag).
+
 ## Quick start — bare Python
 
 ```bash

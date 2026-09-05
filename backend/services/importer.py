@@ -2,11 +2,6 @@
 (YOLO detect/segment layout with data.yaml, or a classify folder-per-class
 layout), or another project already on this platform (merge).
 
-Matching is always by class *name*: a class already present in the target
-project is reused, anything new is created (same pattern as autolabel's
-create_missing_classes). Images are copied through storage.save_upload, which
-de-duplicates filenames and rebuilds thumbnails, so nothing here touches the
-source files.
 """
 from __future__ import annotations
 

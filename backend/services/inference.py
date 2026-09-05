@@ -1,7 +1,5 @@
 """Model-assisted labeling.
 
-All heavy imports (torch / ultralytics / rfdetr) are lazy so the platform
-starts instantly and degrades gracefully when a library is missing.
 """
 from __future__ import annotations
 
@@ -63,8 +61,7 @@ def _load_rtdetr(weights: str):
 
 
 def is_rtdetr_arch(model_name: str, db=None) -> bool:
-    """True for the rtdetr-l.pt/rtdetr-x.pt aliases, or a 'weight:<id>' reference to
-    a weight that was itself trained as rtdetr (tracked via ModelWeight.arch)."""
+    """Returns True if the model is an RT-DETR architecture (vs YOLO)."""
     if model_name.startswith("weight:") and db is not None:
         from ..db import ModelWeight
         wid = int(model_name.split(":", 1)[1])

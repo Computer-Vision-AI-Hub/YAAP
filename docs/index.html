@@ -118,6 +118,7 @@ code,.mono{font-family:var(--font-mono)}
 @media (max-width:820px){.get-grid{grid-template-columns:1fr}}
 .get-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:26px;
   display:flex;flex-direction:column}
+.get-card.featured{border:1.5px solid var(--amber-dim);box-shadow:0 0 0 1px rgba(232,185,60,.1)}
 .get-card .gh-title{display:flex;align-items:center;gap:10px;margin-bottom:6px}
 .get-card h3{font-size:19px}
 .get-card p.desc{color:var(--muted);font-size:13.5px;margin-bottom:18px}
@@ -375,6 +376,28 @@ docker run -d --name yaap-cpu \
         </div>
         <div class="foot-link">Image + tags on <a href="https://hub.docker.com/r/lukasiktar/yaap" target="_blank" rel="noopener">Docker Hub →</a></div>
       </div>
+    </div>
+
+    <div class="get-card featured" style="margin-top:20px">
+      <div class="gh-title">
+        <span style="font-size:20px">⚡</span>
+        <h3>Fastest — portable launcher</h3>
+      </div>
+      <p class="desc">No git clone, no manual <code class="mono">docker run</code> flags. One script
+        pulls the right image, sets up persistent storage under <code class="mono">~/YAAP</code>,
+        and installs a desktop shortcut — from then on, just click the icon.</p>
+      <div class="tag-row">
+        <span class="pill gpu">auto-detects GPU</span>
+        <span class="pill cpu">falls back to CPU</span>
+      </div>
+      <div class="code-block">
+        <pre><span class="cm"># grab it, then run it once</span>
+curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
+bash yaap-portable-launch.sh</pre>
+        <button class="copy-btn" data-copy="curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
+bash yaap-portable-launch.sh">copy</button>
+      </div>
+      <div class="foot-link">Want to read it first? <a href="yaap-portable-launch.sh" target="_blank" rel="noopener">view the script</a> or <a href="yaap-portable-launch.sh" download>⬇ download it</a> without running anything.</div>
     </div>
 
     <p class="bare-note">Prefer bare Python? <code class="mono">pip install -r requirements.txt && python run.py</code> — see the <a href="https://github.com/Computer-Vision-AI-Hub/YAAP#quick-start--bare-python" target="_blank" rel="noopener">README</a> for the CUDA-matched torch install step.</p>

@@ -125,10 +125,6 @@ def _run_autolabel(pid: int, jid: int, req: InferenceRequest):
                                           confidence=p["confidence"]))
                         added += 1
                     if added:
-                        # distinct from a human's "annotated" so these can be
-                        # filtered/triaged separately — not auto-flagged for
-                        # review either; the user approves in the preview step
-                        # before it enters "Needs review" (/autolabel/{jid}/preview)
                         im.status = "auto-annotated"
                         labeled_ids.append(im.id)
                         job.images_labeled += 1
@@ -186,12 +182,7 @@ def device_info():
     return inference.torch_info()
 
 
-# Host-side auto-shutdown (see launch.sh's watcher loop): the browser tells us
-# when it's actually closing (not just backgrounded — `pagehide` only fires on
-# a real close/navigate-away/reload) via sendBeacon, and we drop a timestamp
-# file the watcher polls. Any later page load cancels it, so a reload or a
-# quick reopen never triggers a shutdown — only really leaving does, and only
-# after a grace period the watcher enforces.
+# Host-side auto-shutdown 
 LEAVE_MARKER = DATA_DIR / ".leave_at"
 
 

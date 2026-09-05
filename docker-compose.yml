@@ -27,7 +27,6 @@ services:
     shm_size: "8gb"               # DataLoader workers need shared memory
     environment:
       # Download these once at first start, then the container can run air-gapped.
-      # Set to "" to disable all downloads (upload .pt files through the UI instead).
       PRELOAD_MODELS: "sam3.pt yolo11n.pt"
     deploy:
       resources:

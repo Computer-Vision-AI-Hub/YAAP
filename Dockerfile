@@ -38,6 +38,10 @@ COPY backend ./backend
 COPY frontend ./frontend
 COPY tests ./tests
 COPY run.py entrypoint.sh start.sh pytest.ini ./
+# lets a Docker-Hub-only install grab the host launcher with just `docker run
+# --rm <image> cat /opt/yaap-portable-launch.sh > yaap-portable-launch.sh` —
+# no GitHub involved
+COPY docs/yaap-portable-launch.sh /opt/yaap-portable-launch.sh
 RUN chmod +x entrypoint.sh start.sh && chown -R yaap:yaap /app
 
 EXPOSE 8811
@@ -77,6 +81,8 @@ COPY backend ./backend
 COPY frontend ./frontend
 COPY tests ./tests
 COPY run.py entrypoint.sh start.sh pytest.ini ./
+
+COPY docs/yaap-portable-launch.sh /opt/yaap-portable-launch.sh
 RUN chmod +x entrypoint.sh start.sh && chown -R yaap:yaap /app
 
 EXPOSE 8811

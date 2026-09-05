@@ -3,8 +3,6 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-# overridable so the test suite can point the whole app at a throwaway dir
-# instead of the real data/ — see tests/conftest.py
 DATA_DIR = Path(os.environ.get("YAAP_DATA_DIR", BASE_DIR / "data"))
 PROJECTS_DIR = DATA_DIR / "projects"
 MODELS_DIR = DATA_DIR / "models"          # uploaded / pretrained weights cache

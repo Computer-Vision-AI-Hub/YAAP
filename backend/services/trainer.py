@@ -1,4 +1,4 @@
-"""Launch / monitor / stop ultralytics training jobs (subprocess-based)."""
+"""Launch / monitor / stop ultralytics training jobs."""
 from __future__ import annotations
 
 import json
@@ -82,10 +82,7 @@ def refresh_status(db, job: TrainJob):
 
 def delete(db, job: TrainJob):
     """Remove a job's DB row, its log file, AND its run folder under
-    RUNS_DIR (weights, results.png, confusion_matrix.png, etc.) — the user
-    is done with this run and wants the disk space back. Any ModelWeight
-    registered from it is deleted too, since its .pt file won't exist
-    anymore once the folder is gone (it was never copied elsewhere)."""
+    RUNS_DIR (weights, results.png, confusion_matrix.png, etc.)."""
     if job.status == "running":
         stop(db, job)
     if job.log_path:

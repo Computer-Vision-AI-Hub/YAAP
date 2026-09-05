@@ -1,25 +1,5 @@
 """Dataset version generation.
 
-detect/segment tasks always get the ultralytics-ready YOLO layout — needed
-for in-platform YOLO/RT-DETR training regardless of `config["format"]`:
-    v<id>/
-      data.yaml
-      train/images  train/labels   (+ val/, test/)
-classify tasks always use this folder layout instead (no format choice):
-    v<id>/
-      train/<class_name>/*.jpg     (+ val/, test/)
-
-`config["format"] == "coco"` adds a second, parallel layout alongside the
-YOLO one — Roboflow-style, matching what most COCO-consuming tools
-(pycocotools, HuggingFace transformers, detectron2) expect out of the box:
-    v<id>/
-      train/_annotations.coco.json  train/*.jpg   (+ val/, test/)
-
-So a "coco" version is trainable in-platform (via the YOLO layout it also
-contains) *and* exportable for external COCO-based tooling — pick "coco"
-whenever you might want either, not just when you're leaving the platform.
-
-A .zip sits next to the folder for one-click download either way.
 """
 from __future__ import annotations
 
@@ -87,8 +67,7 @@ def _write_label_txt(path: Path, anns: list[dict], class_idx: dict[int, int], w:
 
 
 def _coco_ann(a: dict, class_idx: dict[int, int]) -> dict | None:
-    """One YAAP annotation dict → one COCO annotation dict (sans id/image_id,
-    filled in by the caller). category_id is 1-based, the COCO convention."""
+    
     ci = class_idx.get(a["class_id"])
     if ci is None:
         return None
@@ -109,10 +88,7 @@ def _coco_ann(a: dict, class_idx: dict[int, int]) -> dict | None:
 
 def _write_coco_json(path: Path, entries: list[tuple[str, int, int, list[dict]]],
                      classes: list[LabelClass], class_idx: dict[int, int]):
-    """Roboflow-style layout: one `_annotations.coco.json` per split, sitting
-    right alongside that split's images (no images/labels subfolders) — the
-    convention most COCO-consuming tools (pycocotools, HF transformers,
-    detectron2) expect out of the box."""
+    """Roboflow-style layout: one `_annotations.coco.json` per split"""
     categories = [{"id": i + 1, "name": c.name, "supercategory": "none"} for i, c in enumerate(classes)]
     images_j, anns_j = [], []
     ann_id = 1
@@ -245,9 +221,7 @@ def version_dir(project_id: int, version_id: int) -> Path:
 
 
 def export_raw(project: Project, approved_only: bool = False) -> Path:
-    """Pack the project's current images + annotations as-is — no split,
-    no preprocessing, no augmentation, no DatasetVersion row. Rebuilt fresh
-    on every call so it always reflects the latest annotations."""
+    """Pack the project's current images + annotations as-is."""
     classes: list[LabelClass] = list(project.classes)
     class_idx = {c.id: i for i, c in enumerate(classes)}
     class_name = {c.id: c.name for c in classes}

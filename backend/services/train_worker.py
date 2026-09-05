@@ -46,10 +46,10 @@ def main():
         model = ModelCls(job.model_arch)
         results = model.train(
             data=params["data"],
-            epochs=int(params.get("epochs", 100)),
+            epochs=int(params.get("epochs", 60)),
             imgsz=int(params.get("imgsz", 640)),
             batch=int(params.get("batch", 16)),
-            patience=int(params.get("patience", 50)),
+            patience=int(params.get("patience", 10)),
             device=device,
             project=str(RUNS_DIR),
             name=f"job_{job.id}",
@@ -62,9 +62,6 @@ def main():
         db.commit()
 
         if best.exists():
-            # arch is free text read back by is_rtdetr_arch() for future auto-label/train
-            # calls on this weight — job.model_arch is a resolved path for continued
-            # training and may not contain "rtdetr", so tag it explicitly when it applies.
             arch_label = f"rtdetr:{Path(job.model_arch).name}" if is_rtdetr else job.model_arch
             db.add(ModelWeight(project_id=job.project_id,
                                name=f"{job.model_arch.replace('.pt','')} · job {job.id} (best)",
