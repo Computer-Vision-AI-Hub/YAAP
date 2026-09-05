@@ -45,7 +45,9 @@ const API = {
 
   // models / inference
   models:    (pid, task)       => API._j(`/api/models?pid=${pid}&task=${task}`),
-  autolabel: (pid, b)          => API._j(`/api/projects/${pid}/autolabel`, { method: "POST", body: JSON.stringify(b) }),
+  autolabel:        (pid, b)   => API._j(`/api/projects/${pid}/autolabel`, { method: "POST", body: JSON.stringify(b) }),
+  autolabelJob:     (pid, jid) => API._j(`/api/projects/${pid}/autolabel/${jid}`),
+  autolabelPreview: (pid, jid) => API._j(`/api/projects/${pid}/autolabel/${jid}/preview`),
   device:    ()                => API._j("/api/system/device"),
   async uploadWeight(file, task, pid) {
     const fd = new FormData(); fd.append("file", file);
@@ -83,6 +85,7 @@ const API = {
   jobs:     (pid)              => API._j(`/api/projects/${pid}/train`),
   train:    (pid, b)           => API._j(`/api/projects/${pid}/train`, { method: "POST", body: JSON.stringify(b) }),
   jobLog:   (pid, jid, lines)  => API._j(`/api/projects/${pid}/train/${jid}/log${lines ? `?lines=${lines}` : ""}`),
+  jobPlotUrl: (pid, jid, name) => `/api/projects/${pid}/train/${jid}/plot/${name}`,
   stopJob:  (pid, jid)         => API._j(`/api/projects/${pid}/train/${jid}/stop`, { method: "POST" }),
   deleteJob: (pid, jid)        => API._j(`/api/projects/${pid}/train/${jid}`, { method: "DELETE" }),
 };

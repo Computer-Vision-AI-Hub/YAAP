@@ -7,8 +7,9 @@ const S = { project: null, images: [], curImage: -1, editor: null, saveTimer: nu
             activeClassId: null, jobPoll: null, verPoll: null,
             // one-shot hints consumed by the next viewAnnotate() call, set by whoever
             // navigates there (e.g. the Review grid) to control which image opens first,
-            // how the working list is ordered, and whether to flag already-annotated images
-            pendingImageId: null, annotateSort: null, warnIfAnnotated: false };
+            // which QC section's images to confine Prev/Next + the counter to, and
+            // whether to flag already-annotated images
+            pendingImageId: null, annotateScope: null, warnIfAnnotated: false };
 
 /* ── plumbing ─────────────────────────────────────────────────────── */
 function toast(msg, kind = "") {
@@ -28,6 +29,13 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#homeBtn").onclick = () => { location.hash = "#/"; };
   loadDevice();
   route();
+  fetch("/api/system/here", { method: "POST" }).catch(() => {});
+});
+// tells launch.sh's host-side watcher we're actually leaving (tab closed,
+// navigated away, or reloading) — not just backgrounded — so it can free the
+// container's resources after a grace period if we don't come back
+window.addEventListener("pagehide", () => {
+  navigator.sendBeacon && navigator.sendBeacon("/api/system/leaving");
 });
 
 async function loadDevice() {
@@ -225,16 +233,19 @@ async function viewUpload() {
 
 /* ── review / quality control ────────────────────────────────────── */
 // "reviewable" is a pseudo-filter (not a real status): images that still need
-// a QC decision — freshly annotated, or rejected and waiting on a re-review
-// after being fixed. Unannotated (nothing to review yet) and approved
-// (already resolved) are both excluded, so this queue actually drains to
-// empty as you work through it instead of staying populated forever.
+// a QC decision — freshly annotated (by hand or by a model), or rejected and
+// waiting on a re-review after being fixed. Unannotated (nothing to review
+// yet) and approved (already resolved) are both excluded, so this queue
+// actually drains to empty as you work through it instead of staying
+// populated forever. There's no direct "Annotated" filter — every annotated
+// image (manual or auto) already surfaces under "To review".
 const QC_FILTERS = [
-  ["reviewable", "To review"], ["all", "All"], ["unannotated", "Unannotated"],
-  ["annotated", "Annotated"], ["review", "Needs review"], ["approved", "Approved"],
+  ["unannotated", "Unannotated"], ["reviewable", "To review"],
+  ["auto-annotated", "Auto-annotated"], ["review", "Needs re-annotation"],
+  ["approved", "Approved"],
 ];
-const qcMatch = (im, filter) => filter === "all" ? true
-  : filter === "reviewable" ? (im.status === "annotated" || im.status === "review")
+const qcMatch = (im, filter) => filter === "reviewable"
+  ? (im.status === "annotated" || im.status === "auto-annotated" || im.status === "empty" || im.status === "review")
   : im.status === filter;
 
 async function viewReview() {
@@ -252,7 +263,8 @@ async function viewReview() {
     $("#stage").innerHTML = `<div class="stage-pad">
       <h1 class="page">Quality control</h1>
       <p class="sub">Every image in one place — filter by review state, jump into an image to fix a
-        wrong label or box, approve it once it checks out, or reject it to flag it for re-work.</p>
+        wrong label or box, approve it once it checks out, reject it to flag it for re-annotation, or
+        erase its annotations entirely (🗑) to send it back to unannotated.</p>
       <div class="row" style="margin-bottom:16px" id="qcFilters">
         ${QC_FILTERS.map(([k, label]) => `
           <button class="btn small ${k === S.qcFilter ? "primary" : "ghost"}" data-f="${k}">${label} <span class="mono">${counts[k] ?? 0}</span></button>`).join("")}
@@ -262,7 +274,9 @@ async function viewReview() {
 
     $$("#qcFilters [data-f]").forEach(b => b.onclick = () => {
       S.qcFilter = b.dataset.f;
-      if (b.dataset.f === "reviewable") { startQuickReview(); return; }
+      // both of these are single-image browsers, not grids — jump straight in
+      if (b.dataset.f === "reviewable") { startQuickReview(null, "review"); return; }
+      if (b.dataset.f === "approved") { startQuickReview(null, "approved"); return; }
       render();
     });
 
@@ -275,17 +289,17 @@ async function viewReview() {
         <div class="qc-actions">
           <button class="btn small" data-open="${im.id}" title="Open in editor">✎</button>
           <button class="btn small ${im.status === "review" ? "danger" : ""}" data-reject="${im.id}"
-            title="${im.status === "review" ? "Rejected — clear flag" : "Reject — flag for re-work"}">✕</button>
+            title="${im.status === "review" ? "Flagged for re-annotation — clear flag" : "Reject — flag for re-annotation"}">✕</button>
           <button class="btn small ${im.status === "approved" ? "primary" : ""}" data-approve="${im.id}"
             title="${im.status === "approved" ? "Un-approve" : "Approve"}">✓</button>
+          <button class="btn small" data-clear="${im.id}" ${im.annotation_count ? "" : "disabled"}
+            title="Erase annotations — back to unannotated">🗑</button>
         </div>
         <span class="nm">${esc(im.filename)} · ${im.annotation_count} ann.</span>
       </div>`).join("");
 
     $$(".qc-tile", host).forEach(t => t.onclick = e => {
-      if (e.target.closest("button")) return;
-      if (S.qcFilter === "reviewable") startQuickReview(+t.dataset.id);
-      else openReviewImage(+t.dataset.id);
+      if (!e.target.closest("button")) openReviewImage(+t.dataset.id);
     });
     $$("[data-open]", host).forEach(b => b.onclick = () => openReviewImage(+b.dataset.open));
     $$("[data-approve]", host).forEach(b => b.onclick = async () => {
@@ -293,6 +307,15 @@ async function viewReview() {
       const next = im.status === "approved" ? "annotated" : "approved";
       try { im.status = (await API.patchImage(p.id, im.id, { status: next })).status; render(); }
       catch (e) { err(e); }
+    });
+    $$("[data-clear]", host).forEach(b => b.onclick = async () => {
+      const im = images.find(x => x.id === +b.dataset.clear);
+      if (!confirm(`Erase all ${im.annotation_count} annotation(s) on "${im.filename}" and reset it to unannotated?`)) return;
+      try { await API.saveAnnotations(p.id, im.id, []); }
+      catch (e) { return err(e); }
+      im.status = "unannotated"; im.annotation_count = 0;
+      render();
+      toast("Annotations cleared.", "ok");
     });
     $$("[data-reject]", host).forEach(b => b.onclick = async () => {
       const im = images.find(x => x.id === +b.dataset.reject);
@@ -307,7 +330,7 @@ async function viewReview() {
     // pre-setting S.images/S.curImage directly (that assignment would just get
     // overwritten by the fresh fetch before it's ever read).
     S.pendingImageId = imgId;
-    S.annotateSort = S.qcFilter === "unannotated" ? "unannotatedFirst" : null;
+    S.annotateScope = S.qcFilter;   // confine Prev/Next + the counter to this section's images
     S.warnIfAnnotated = S.qcFilter === "unannotated";
     nav("annotate");
   }
@@ -315,36 +338,77 @@ async function viewReview() {
   render();
 }
 
-function startQuickReview(imgId) {
+// Shared by Quick Review and the auto-label preview grid: annotations -> SVG shapes + labels.
+function annotationShapesSvg(anns, classes, imgWidth) {
+  const strokeW = Math.max(2, Math.round(imgWidth / 350));
+  const fontSize = Math.min(42, Math.max(14, Math.round(imgWidth / 40)));
+  return anns.map(a => {
+    const c = classes.find(x => x.id === a.class_id);
+    const color = c ? c.color : "#999";
+    const name = (c ? c.name : "?") + (a.source === "model" ? ` ·${Math.round(a.confidence * 100)}%` : "");
+    let shape, lx, ly;
+    if (a.kind === "bbox") {
+      const d = a.data;
+      shape = `<rect x="${d.x}" y="${d.y}" width="${d.w}" height="${d.h}" fill="${color}33" stroke="${color}" stroke-width="${strokeW}"/>`;
+      lx = d.x; ly = d.y;
+    } else if (a.kind === "polygon") {
+      const pts = a.data.points.map(pt => pt.join(",")).join(" ");
+      shape = `<polygon points="${pts}" fill="${color}33" stroke="${color}" stroke-width="${strokeW}"/>`;
+      [lx, ly] = a.data.points[0];
+    } else return "";
+    // label tag — clamped so it never sits above the image's own top edge
+    const labelY = Math.max(fontSize + 4, ly);
+    const labelW = Math.max(name.length * fontSize * 0.62, fontSize * 1.6);
+    const label = `<rect x="${lx}" y="${labelY - fontSize - 4}" width="${labelW}" height="${fontSize + 6}" fill="${color}"/>
+      <text x="${lx + 4}" y="${labelY - 5}" font-size="${fontSize}" font-family="monospace"
+        font-weight="600" fill="#0a0a0a">${esc(name)}</text>`;
+    return shape + label;
+  }).join("");
+}
+
+function startQuickReview(imgId, mode = "review") {
   S.pendingImageId = imgId ?? null;
+  S.reviewMode = mode;
   nav("quickreview");
 }
 
-/* ── quick review: accept/reject only, no editing, auto-advances the queue ── */
+/* ── quick review: a single-image browser with two modes.
+   "review"   — accept/reject, auto-advances, drains the "To review" queue.
+   "approved" — prev/next arrows to browse, plus a revert button; nothing
+                auto-advances except a revert (which removes that image from
+                the approved set, so it makes sense to move on). Both share
+                zoom/pan (wheel or +/− buttons) on the image itself. ── */
 async function viewQuickReview() {
   const p = S.project;
+  const mode = S.reviewMode || "review";
+  S.reviewMode = null;
   let images;
   try { images = await API.images(p.id); } catch (e) { return err(e); }
 
-  let queue = images.filter(im => qcMatch(im, "reviewable"));
+  let queue = images.filter(im => qcMatch(im, mode === "approved" ? "approved" : "reviewable"));
   if (S.pendingImageId != null) {
     const i = queue.findIndex(x => x.id === S.pendingImageId);
     if (i > 0) queue = queue.slice(i);
     S.pendingImageId = null;
   }
   if (!queue.length) {
-    toast("Nothing left to review.", "ok");
+    toast(mode === "approved" ? "No approved images yet." : "Nothing left to review.", "ok");
     nav("review");
     return;
   }
 
-  let idx = 0;
+  let idx = 0, zoom = 1;
 
   function onKey(e) {
     if (e.target.matches("input,textarea,select")) return;
-    const k = e.key.toLowerCase();
-    if (k === "a") $("#qrAccept")?.click();
-    else if (k === "r") $("#qrReject")?.click();
+    if (mode === "review") {
+      const k = e.key.toLowerCase();
+      if (k === "a") $("#qrAccept")?.click();
+      else if (k === "r") $("#qrReject")?.click();
+    } else {
+      if (e.key === "ArrowLeft") $("#qrPrev")?.click();
+      else if (e.key === "ArrowRight") $("#qrNext")?.click();
+    }
   }
   window.addEventListener("keydown", onKey);
   window.addEventListener("hashchange", function cleanup() {
@@ -352,38 +416,34 @@ async function viewQuickReview() {
     window.removeEventListener("hashchange", cleanup);
   });
 
+  function setZoom(z) {
+    zoom = Math.min(4, Math.max(0.5, Math.round(z * 100) / 100));
+    const svg = $(".qr-frame svg");
+    if (svg) svg.style.transform = `scale(${zoom})`;
+    const lvl = $("#qrZoomLevel"); if (lvl) lvl.textContent = Math.round(zoom * 100) + "%";
+  }
+
   async function renderCurrent() {
     const im = queue[idx];
     let anns = [];
     try { anns = await API.annotations(p.id, im.id); } catch (e) { /* show image without overlays */ }
 
-    const strokeW = Math.max(2, Math.round(im.width / 350));
-    const fontSize = Math.min(42, Math.max(14, Math.round(im.width / 40)));
-    const shapes = anns.map(a => {
-      const c = p.classes.find(x => x.id === a.class_id);
-      const color = c ? c.color : "#999";
-      const name = (c ? c.name : "?") + (a.source === "model" ? ` ·${Math.round(a.confidence * 100)}%` : "");
-      let shape, lx, ly;
-      if (a.kind === "bbox") {
-        const d = a.data;
-        shape = `<rect x="${d.x}" y="${d.y}" width="${d.w}" height="${d.h}" fill="${color}33" stroke="${color}" stroke-width="${strokeW}"/>`;
-        lx = d.x; ly = d.y;
-      } else if (a.kind === "polygon") {
-        const pts = a.data.points.map(pt => pt.join(",")).join(" ");
-        shape = `<polygon points="${pts}" fill="${color}33" stroke="${color}" stroke-width="${strokeW}"/>`;
-        [lx, ly] = a.data.points[0];
-      } else return "";
-      // label tag — clamped so it never sits above the image's own top edge
-      const labelY = Math.max(fontSize + 4, ly);
-      const labelW = Math.max(name.length * fontSize * 0.62, fontSize * 1.6);
-      const label = `<rect x="${lx}" y="${labelY - fontSize - 4}" width="${labelW}" height="${fontSize + 6}" fill="${color}"/>
-        <text x="${lx + 4}" y="${labelY - 5}" font-size="${fontSize}" font-family="monospace"
-          font-weight="600" fill="#0a0a0a">${esc(name)}</text>`;
-      return shape + label;
-    }).join("");
+    const shapes = annotationShapesSvg(anns, p.classes, im.width);
+    zoom = 1;
+
+    const actionsHtml = mode === "review" ? `
+      <div class="row" style="margin-top:18px;justify-content:center;gap:16px">
+        <button class="btn danger qr-btn" id="qrReject">✕ Reject <span class="kbd">R</span></button>
+        <button class="btn primary qr-btn" id="qrAccept">✓ Accept <span class="kbd">A</span></button>
+      </div>` : `
+      <div class="row" style="margin-top:18px;justify-content:center;gap:16px">
+        <button class="btn qr-btn" id="qrPrev" ${idx === 0 ? "disabled" : ""} title="Previous (←)">← Prev</button>
+        <button class="btn danger qr-btn" id="qrRevert">↺ Revert to Needs re-annotation</button>
+        <button class="btn qr-btn" id="qrNext" ${idx === queue.length - 1 ? "disabled" : ""} title="Next (→)">Next →</button>
+      </div>`;
 
     $("#stage").innerHTML = `<div class="stage-pad" style="max-width:900px">
-      <h1 class="page">Review queue</h1>
+      <h1 class="page">${mode === "approved" ? "Approved images" : "Review queue"}</h1>
       <p class="sub">${idx + 1} of ${queue.length} · ${esc(im.filename)} · ${anns.length} annotation(s)</p>
       <div class="qr-frame">
         <svg viewBox="0 0 ${im.width} ${im.height}" preserveAspectRatio="xMidYMid meet">
@@ -391,14 +451,31 @@ async function viewQuickReview() {
           ${shapes}
         </svg>
       </div>
-      <div class="row" style="margin-top:18px;justify-content:center;gap:16px">
-        <button class="btn danger qr-btn" id="qrReject">✕ Reject <span class="kbd">R</span></button>
-        <button class="btn primary qr-btn" id="qrAccept">✓ Accept <span class="kbd">A</span></button>
+      <div class="row" style="justify-content:center;align-items:center;gap:6px;margin-top:10px">
+        <button class="btn small" id="qrZoomOut" title="Zoom out">−</button>
+        <span class="mono" id="qrZoomLevel" style="min-width:42px;text-align:center">100%</span>
+        <button class="btn small" id="qrZoomIn" title="Zoom in">+</button>
+        <button class="btn small ghost" id="qrZoomReset" title="Reset zoom">Fit</button>
       </div>
+      ${actionsHtml}
     </div>`;
 
-    $("#qrAccept").onclick = () => decide("approved");
-    $("#qrReject").onclick = () => decide("review");
+    $("#qrZoomIn").onclick = () => setZoom(zoom + 0.25);
+    $("#qrZoomOut").onclick = () => setZoom(zoom - 0.25);
+    $("#qrZoomReset").onclick = () => setZoom(1);
+    $(".qr-frame").addEventListener("wheel", e => {
+      e.preventDefault();
+      setZoom(zoom + (e.deltaY < 0 ? 0.15 : -0.15));
+    }, { passive: false });
+
+    if (mode === "review") {
+      $("#qrAccept").onclick = () => decide("approved");
+      $("#qrReject").onclick = () => decide("review");
+    } else {
+      $("#qrPrev").onclick = () => { if (idx > 0) { idx--; renderCurrent(); } };
+      $("#qrNext").onclick = () => { if (idx < queue.length - 1) { idx++; renderCurrent(); } };
+      $("#qrRevert").onclick = () => revert();
+    }
   }
 
   async function decide(status) {
@@ -410,6 +487,20 @@ async function viewQuickReview() {
       nav("review");
       return;
     }
+    renderCurrent();
+  }
+
+  async function revert() {
+    const im = queue[idx];
+    try { await API.patchImage(p.id, im.id, { status: "review" }); } catch (e) { return err(e); }
+    toast(`"${im.filename}" sent back to Needs re-annotation.`, "ok");
+    queue.splice(idx, 1);
+    if (!queue.length) {
+      toast("No more approved images.", "ok");
+      nav("review");
+      return;
+    }
+    if (idx >= queue.length) idx = queue.length - 1;
     renderCurrent();
   }
 
@@ -476,13 +567,14 @@ async function viewAnnotate() {
       <button class="btn primary" onclick="nav('classes')">Go to classes</button></div></div>`;
     return;
   }
-  if (S.annotateSort === "unannotatedFirst") {
-    // stable sort: unannotated images first, original relative order preserved
-    // within each group — so browsing naturally flows unannotated → annotated
-    S.images = [...S.images].sort((a, b) =>
-      (a.status === "unannotated" ? 0 : 1) - (b.status === "unannotated" ? 0 : 1));
+  if (S.annotateScope) {
+    // confine Prev/Next and the "N/total" counter to just this QC section's
+    // images — a snapshot taken now, not re-filtered as statuses change
+    // during the session (so the count doesn't shift under you mid-edit)
+    const scoped = S.images.filter(im => qcMatch(im, S.annotateScope));
+    if (scoped.length) S.images = scoped;
   }
-  S.annotateSort = null;   // one-shot — only applies to this entry, not future navigation
+  S.annotateScope = null;   // one-shot — only applies to this entry, not future navigation
 
   if (S.pendingImageId != null) {
     const i = S.images.findIndex(x => x.id === S.pendingImageId);
@@ -534,7 +626,9 @@ async function viewAnnotate() {
     <aside class="ed-side">
       ${isCls ? `<h4>Label this image</h4><div class="cls-panel" id="clsPanel"></div>`
               : `<h4>Classes <span class="kbd">1–9</span></h4><div class="ed-classes" id="edClasses"></div>
-                 <h4>Annotations</h4><div class="ed-anns" id="edAnns"></div>`}
+                 <h4>Annotations</h4><div class="ed-anns" id="edAnns"></div>
+                 <button class="btn small ghost" id="edMarkEmpty" style="width:100%;margin-top:8px"
+                   title="No objects in this image — mark it empty so it stops showing as unannotated">∅ Mark empty</button>`}
       <div class="ed-nav">
         <button class="btn" id="prevImg" title="Previous (←)">←</button>
         <span class="chip mono" id="imgPos" style="align-self:center"></span>
@@ -673,6 +767,7 @@ async function viewAnnotate() {
     const st = $("#saveState"); st.textContent = "unsaved"; st.className = "savestate dirty";
     clearTimeout(S.saveTimer);
     S.saveTimer = setTimeout(save, 700);
+    renderMarkEmpty();   // drawing/deleting anything should reset the "empty" flag right away, not after the debounce
   }
   async function save() {
     if (!dirty) return;
@@ -706,7 +801,7 @@ async function viewAnnotate() {
     ]);
     editor.load(el, anns);
     $("#edHud").textContent = `${im.width}×${im.height}px`;
-    renderApprove(); renderReject();
+    renderApprove(); renderReject(); renderMarkEmpty();
     renderSide();
   }
 
@@ -721,7 +816,7 @@ async function viewAnnotate() {
     try {
       await API.patchImage(p.id, im.id, { status: im.status === "approved" ? "annotated" : "approved" });
       im.status = im.status === "approved" ? "annotated" : "approved";
-      renderApprove(); renderReject();
+      renderApprove(); renderReject(); renderMarkEmpty();
       toast(im.status === "approved" ? "Marked as approved." : "Approval cleared.", "ok");
     } catch (e) { err(e); }
   });
@@ -738,9 +833,45 @@ async function viewAnnotate() {
       const next = im.status === "review" ? "annotated" : "review";
       await API.patchImage(p.id, im.id, { status: next });
       im.status = next;
-      renderApprove(); renderReject();
+      renderApprove(); renderReject(); renderMarkEmpty();
       toast(im.status === "review" ? "Flagged for review." : "Rejection cleared.", "ok");
     } catch (e) { err(e); }
+  });
+
+  function renderMarkEmpty() {
+    const im = S.images[S.curImage];
+    const btn = $("#edMarkEmpty"); if (!btn) return;
+    // live anns count, not just im.status — the moment something is drawn it's
+    // no longer empty, even before the debounced save confirms it server-side
+    const isEmpty = im.status === "empty" && editor.anns.length === 0;
+    btn.textContent = isEmpty ? "∅ Marked empty — undo" : "∅ Mark empty";
+    btn.classList.toggle("primary", isEmpty);
+  }
+  $("#edMarkEmpty") && ($("#edMarkEmpty").onclick = async () => {
+    const im = S.images[S.curImage];
+    if (im.status === "empty") {
+      try { await API.patchImage(p.id, im.id, { status: "unannotated" }); }
+      catch (e) { return err(e); }
+      im.status = "unannotated";
+      renderApprove(); renderReject(); renderMarkEmpty();
+      toast("Empty flag cleared.", "ok");
+      return;
+    }
+    if (editor.anns.length &&
+        !confirm(`This image has ${editor.anns.length} annotation(s). Clear them and mark it empty (no objects)?`)) return;
+    clearTimeout(S.saveTimer);
+    editor.anns = [];
+    editor.select(-1);
+    editor.draw();
+    try {
+      await API.saveAnnotations(p.id, im.id, []);
+      await API.patchImage(p.id, im.id, { status: "empty" });
+    } catch (e) { return err(e); }
+    dirty = false;
+    const st = $("#saveState"); st.textContent = "saved"; st.className = "savestate saved";
+    im.annotation_count = 0; im.status = "empty";
+    renderApprove(); renderReject(); renderMarkEmpty(); renderAnnList();
+    toast("Marked as empty — no objects to annotate.", "ok");
   });
 
   function renderSide() {
@@ -841,7 +972,9 @@ async function viewAutolabel() {
         <button class="btn primary" id="alGo">Run auto-label</button>
         <span class="chip mono" id="alStatus"></span>
       </div>
+      <div id="alProgress"></div>
     </div>
+    <div id="alPreview"></div>
     <h3 class="sect">Bring your own weights</h3>
     <div class="card row">
       <input type="file" id="wtFile" accept=".pt" class="input" style="flex:1">
@@ -850,25 +983,106 @@ async function viewAutolabel() {
 
   $("#alGo").onclick = async () => {
     const btn = $("#alGo"); btn.disabled = true;
-    $("#alStatus").textContent = "running… (first run may download weights)";
+    $("#alStatus").textContent = "starting… (first run may download weights)";
+    $("#alPreview").innerHTML = "";
     try {
       const imgs = await API.images(p.id);
       const ids = $("#alScope").value === "unannotated"
         ? imgs.filter(i => !i.annotation_count).map(i => i.id) : [];
-      const res = await API.autolabel(p.id, {
+      const job = await API.autolabel(p.id, {
         model_name: $("#alModel").value, conf: +$("#alConf").value, image_ids: ids,
         replace_existing: $("#alReplace").checked, create_missing_classes: $("#alCreate").checked,
       });
       $("#alStatus").textContent = "";
-      toast(`Labeled ${res.images_labeled}/${res.images_total} images · +${res.annotations_added} annotations`, "ok");
-    } catch (e) { $("#alStatus").textContent = ""; err(e); }
-    btn.disabled = false;
+      watchAutolabelJob(p, job.id);
+    } catch (e) { $("#alStatus").textContent = ""; btn.disabled = false; err(e); }
   };
   $("#wtGo").onclick = async () => {
     const f = $("#wtFile").files[0];
     if (!f) return;
     try { await API.uploadWeight(f, p.task_type, p.id); toast("Weights uploaded.", "ok"); viewAutolabel(); }
     catch (e) { err(e); }
+  };
+}
+
+function renderAlProgress(job) {
+  $("#alProgress").innerHTML = `
+    <div class="row" style="align-items:center;gap:10px;margin-top:14px">
+      <span class="pill ${job.status}">${job.status}</span>
+      <span class="mono" style="font-size:12px;color:var(--muted)">${job.processed}/${job.total} images
+        · ${job.images_labeled} labeled · +${job.annotations_added} annotations${job.skipped.length ? ` · ${job.skipped.length} skipped` : ""}</span>
+    </div>
+    <div class="logbox">${esc(job.log || "starting…")}</div>`;
+}
+
+async function watchAutolabelJob(p, jid) {
+  const job = await API.autolabelJob(p.id, jid).catch(err);
+  if (!job) { $("#alGo").disabled = false; return; }
+  renderAlProgress(job);
+  if (job.status === "running") { setTimeout(() => watchAutolabelJob(p, jid), 1200); return; }
+
+  $("#alGo").disabled = false;
+  if (job.status === "failed") { toast(`Auto-label failed: ${job.error}`, "err"); return; }
+  toast(`Labeled ${job.images_labeled}/${job.total} images · +${job.annotations_added} annotations`, "ok");
+  await renderAlPreviewGrid(p, jid);
+}
+
+async function renderAlPreviewGrid(p, jid) {
+  let data;
+  try { data = await API.autolabelPreview(p.id, jid); } catch (e) { return err(e); }
+  if (!data.images.length) {
+    $("#alPreview").innerHTML = `<p class="sub" style="margin-top:16px">Nothing was labeled — try a lower confidence threshold.</p>`;
+    return;
+  }
+
+  const card = im => {
+    const shapes = annotationShapesSvg(im.annotations, p.classes, im.width);
+    const approved = im.status === "review";
+    return `<div class="al-card ${approved ? "approved" : ""}" data-id="${im.id}">
+      <div class="al-frame"><svg viewBox="0 0 ${im.width} ${im.height}" preserveAspectRatio="xMidYMid meet">
+        <image href="${API.imageUrl(p.id, im.id)}" width="${im.width}" height="${im.height}"></image>
+        ${shapes}
+      </svg></div>
+      <div class="al-meta">
+        <span class="mono" title="${esc(im.filename)}">${esc(im.filename)}</span>
+        <span class="mono">${im.annotations.length} obj</span>
+      </div>
+      <div class="row" style="padding:0 10px 10px">
+        <button class="btn small ${approved ? "primary" : ""}" data-approve="${im.id}" ${approved ? "disabled" : ""}>
+          ${approved ? "✓ Approved" : "✓ Approve → Needs review"}</button>
+        <a class="btn small ghost" href="#/p/${p.id}/annotate" data-open="${im.id}">Open</a>
+      </div>
+    </div>`;
+  };
+
+  $("#alPreview").innerHTML = `
+    <div class="row" style="align-items:center;justify-content:space-between;margin-top:20px">
+      <h3 class="sect" style="margin:0">Review auto-labeled images (${data.images.length})</h3>
+      <button class="btn primary small" id="alApproveAll">✓ Approve all → Needs review</button>
+    </div>
+    <div class="al-grid">${data.images.map(card).join("")}</div>`;
+
+  $$("[data-approve]", $("#alPreview")).forEach(btn => btn.onclick = async () => {
+    const iid = +btn.dataset.approve;
+    try { await API.patchImage(p.id, iid, { status: "review" }); } catch (e) { return err(e); }
+    const im = data.images.find(x => x.id === iid);
+    if (im) im.status = "review";
+    btn.closest(".al-card").classList.add("approved");
+    btn.textContent = "✓ Approved"; btn.classList.add("primary"); btn.disabled = true;
+    toast("Approved — sent to Needs review.", "ok");
+  });
+
+  $$("[data-open]", $("#alPreview")).forEach(a => a.onclick = () => { S.pendingImageId = +a.dataset.open; });
+
+  $("#alApproveAll").onclick = async () => {
+    const pending = data.images.filter(im => im.status !== "review");
+    if (!pending.length) return toast("Everything here is already approved.", "");
+    if (!confirm(`Approve all ${pending.length} remaining auto-labeled image(s)? They'll move to Needs review.`)) return;
+    try { await Promise.all(pending.map(im => API.patchImage(p.id, im.id, { status: "review" }))); }
+    catch (e) { return err(e); }
+    pending.forEach(im => { im.status = "review"; });
+    await renderAlPreviewGrid(p, jid);
+    toast(`Approved ${pending.length} image(s).`, "ok");
   };
 }
 
@@ -1211,6 +1425,8 @@ async function viewTrain() {
           <div><label class="fld">Epochs</label><input class="input" id="trEpochs" type="number" value="100"></div>
           <div><label class="fld">Image size</label><input class="input" id="trImgsz" type="number" value="640"></div>
           <div><label class="fld">Batch</label><input class="input" id="trBatch" type="number" value="16"></div>
+          <div><label class="fld" title="Stop early if val loss hasn't improved for this many epochs. 0 disables early stopping.">Patience</label>
+            <input class="input" id="trPatience" type="number" value="10" min="0"></div>
           <div><label class="fld">Device</label>
             <select class="input" id="trDevice"><option value="auto">auto (GPU if available)</option>
               <option value="cpu">cpu</option><option value="cuda:0">cuda:0</option></select></div>
@@ -1241,6 +1457,16 @@ async function viewTrain() {
         <button class="btn small" id="jobLogExpand">⤢ Expand</button>
       </div>
       <div class="logbox" id="jobLog" style="display:none"></div>
+      <div class="row job-plots" id="jobPlots" style="display:none">
+        <div style="flex:1;min-width:260px">
+          <p class="sub" style="margin:12px 0 4px">Results</p>
+          <img id="jobPlotResults" alt="results.png" style="display:none">
+        </div>
+        <div style="flex:1;min-width:260px">
+          <p class="sub" style="margin:12px 0 4px">Confusion matrix</p>
+          <img id="jobPlotConfusion" alt="confusion_matrix.png" style="display:none">
+        </div>
+      </div>
     </div>
 
     <div id="trainColabPane" hidden>
@@ -1338,7 +1564,8 @@ results = model.train(
       await API.train(p.id, {
         version_id: +$("#trVer").value, model_arch: $("#trArch").value,
         epochs: +$("#trEpochs").value, imgsz: +$("#trImgsz").value,
-        batch: +$("#trBatch").value, device: $("#trDevice").value,
+        batch: +$("#trBatch").value, patience: +$("#trPatience").value,
+        device: $("#trDevice").value,
         extra: collectTrainExtra($("#trHpDetails")),
       });
       toast("Training started.", "ok"); renderJobs();
@@ -1364,13 +1591,14 @@ results = model.train(
     });
     $$("[data-deljob]").forEach(b => b.onclick = async () => {
       const jid = +b.dataset.deljob;
-      if (!confirm(`Delete job #${jid}? Its log is removed too (trained weights, if any, are kept).`)) return;
+      if (!confirm(`Delete job #${jid}? This also deletes its training data on disk — weights, log, results.png, confusion_matrix.png — permanently.`)) return;
       try {
         await API.deleteJob(p.id, jid);
         if (watching === jid) {
           watching = null;
           $("#jobLog").style.display = "none";
           $("#jobLogHead").classList.remove("show");
+          $("#jobPlots").style.display = "none";
         }
         renderJobs();
       } catch (e) { err(e); }
@@ -1390,7 +1618,21 @@ results = model.train(
         (wasAtBottom ? "" : " · scrolled up — jump to bottom to resume auto-follow");
       box.textContent = r.log || "(no output yet)";
       if (wasAtBottom) box.scrollTop = box.scrollHeight;
+      showPlots(watching);
     } catch (_) {}
+  }
+  function showPlots(jid) {
+    const r = $("#jobPlotResults"), c = $("#jobPlotConfusion");
+    $("#jobPlots").style.display = "flex";
+    r.onload = () => { r.style.display = "block"; };
+    r.onerror = () => { r.style.display = "none"; };
+    c.onload = () => { c.style.display = "block"; };
+    c.onerror = () => { c.style.display = "none"; };
+    // cache-bust — results.png updates live as ultralytics trains, so a plain
+    // reload while still "running" would otherwise keep showing a stale copy
+    const t = Date.now();
+    r.src = API.jobPlotUrl(p.id, jid, "results") + `?t=${t}`;
+    c.src = API.jobPlotUrl(p.id, jid, "confusion_matrix") + `?t=${t}`;
   }
   $("#jobLogExpand").onclick = () => {
     expanded = !expanded;

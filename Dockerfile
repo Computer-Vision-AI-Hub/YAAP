@@ -36,7 +36,8 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 
 COPY backend ./backend
 COPY frontend ./frontend
-COPY run.py entrypoint.sh start.sh ./
+COPY tests ./tests
+COPY run.py entrypoint.sh start.sh pytest.ini ./
 RUN chmod +x entrypoint.sh start.sh && chown -R yaap:yaap /app
 
 EXPOSE 8811
@@ -74,7 +75,8 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 
 COPY backend ./backend
 COPY frontend ./frontend
-COPY run.py entrypoint.sh start.sh ./
+COPY tests ./tests
+COPY run.py entrypoint.sh start.sh pytest.ini ./
 RUN chmod +x entrypoint.sh start.sh && chown -R yaap:yaap /app
 
 EXPOSE 8811

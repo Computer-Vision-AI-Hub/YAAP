@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 from pathlib import Path
 
 from ..config import BASE_DIR, RUNS_DIR
-from ..db import DatasetVersion, Project, TrainJob
+from ..db import DatasetVersion, ModelWeight, Project, TrainJob
 from . import exporter
 
 
@@ -80,13 +81,17 @@ def refresh_status(db, job: TrainJob):
 
 
 def delete(db, job: TrainJob):
-    """Remove a job's DB row + its log file. Deliberately does NOT touch the
-    run folder under RUNS_DIR — any ModelWeight registered from this job
-    points straight into it (no separate copy), so deleting it would silently
-    break auto-label/training on that weight elsewhere."""
+    """Remove a job's DB row, its log file, AND its run folder under
+    RUNS_DIR (weights, results.png, confusion_matrix.png, etc.) — the user
+    is done with this run and wants the disk space back. Any ModelWeight
+    registered from it is deleted too, since its .pt file won't exist
+    anymore once the folder is gone (it was never copied elsewhere)."""
     if job.status == "running":
         stop(db, job)
     if job.log_path:
         Path(job.log_path).unlink(missing_ok=True)
+    if job.weights_path:
+        db.query(ModelWeight).filter(ModelWeight.path == job.weights_path).delete(synchronize_session=False)
+    shutil.rmtree(RUNS_DIR / f"job_{job.id}", ignore_errors=True)
     db.delete(job)
     db.commit()

@@ -185,6 +185,19 @@ does is a plain REST call (including SAM prompting at
 `POST /api/projects/{pid}/images/{iid}/sam`), so you can script bulk imports,
 programmatic SAM labeling, or CI exports.
 
+## Testing
+
+```bash
+docker compose exec yaap pytest -v      # or: pytest, if running the bare-Python setup
+```
+
+A `pytest` suite in `tests/` covers project/class/image/annotation CRUD and
+dataset version generation (both YOLO and COCO layouts) against a throwaway
+SQLite DB and data dir (`YAAP_DATA_DIR`, set automatically by
+`tests/conftest.py`) — it never touches your real `data/`. It doesn't cover
+anything that needs torch/ultralytics actually loaded (SAM, auto-label,
+training) — those are exercised manually.
+
 ## Notes & limits
 
 - Annotations are stored in pixel coordinates in SQLite and normalized only at

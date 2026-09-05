@@ -180,10 +180,15 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
 - **`models.py`** — `/api/models` lists three sources merged into one dropdown: DB-stored
   `ModelWeight` rows (project-specific + global), `PRETRAINED_MODELS` aliases (Ultralytics
   downloads these on first use), and RF-DETR variants if the `rfdetr` package is
-  installed. `/autolabel` is the heaviest endpoint: for each image, calls
-  `inference.predict()`, optionally auto-creates missing classes (matched **by name**,
-  same pattern reused in `importer.py`), and marks touched images `status="review"` so a
-  human has to pass over model output before it counts as ground truth.
+  installed. `/autolabel` is the heaviest endpoint, and runs as a background job (an
+  `AutolabelJob` row tracks `status`/`processed`/`total`/`log`, polled by the UI) rather
+  than blocking the request — for each image it calls `inference.predict()`, optionally
+  auto-creates missing classes (matched **by name**, same pattern reused in
+  `importer.py`), and marks touched images `status="annotated"` (not `"review"` — that
+  would skip human review entirely). `/autolabel/{jid}/preview` returns exactly the
+  images that job touched, with their new annotations, for the preview-grid the UI shows
+  once the job finishes; approving there (per-image or in bulk) is what actually promotes
+  an image to `status="review"`, via the ordinary `PATCH .../images/{iid}` endpoint.
 - **`sam.py`** — two endpoints: `GET /api/sam/models` (static capability list) and
   `POST /projects/{pid}/images/{iid}/sam` (one point/box prompt → candidate masks).
   Stateless on the backend — the frontend accumulates click history and resends the full
@@ -364,8 +369,9 @@ Views, in rail order:
   projects with a matching `task_type`).
 - **`viewReview`** *(the QC screen)* — filter chips with live counts; each grid tile has
   an "open in editor," a quick-approve, and a quick-reject button (reject sets
-  `status="review"`, reusing the same status autolabel uses for "needs a human pass" —
-  click again to clear it). Clicking the tile itself also opens the editor
+  `status="review"` — the same status the auto-label preview grid's "Approve" button
+  promotes freshly-labeled images to once a human has actually looked at them; click
+  again to clear it). Clicking the tile itself also opens the editor
   (`openReviewImage` reassigns `S.images`/`S.curImage` and navigates to `annotate`, so
   Prev/Next inside the editor walks the same filtered ordering you were browsing). The
   default filter is a pseudo-status, `"reviewable"` (labeled "To review" in the UI) —
@@ -381,6 +387,15 @@ Views, in rail order:
   most stateful view.
 - **`viewAutolabel`** — model picker (merges DB weights + pretrained aliases + RT-DETR +
   RF-DETR), confidence/scope controls, and a "bring your own weights" `.pt` uploader.
+  "Run auto-label" starts the background job and hands off to `watchAutolabelJob()`,
+  which polls `/autolabel/{jid}` (rendering `job.log`/`processed`/`total` into a
+  `.logbox`, same styling as training job logs) until it's done, then calls
+  `renderAlPreviewGrid()`: an `.al-grid` of cards — one per labeled image, each an SVG
+  preview built with the same `annotationShapesSvg()` helper Quick Review uses — with a
+  per-card "Approve → Needs review" button (`PATCH status=review`) plus a header
+  "Approve all" button that `confirm()`s before bulk-patching every not-yet-approved card
+  in the batch. Nothing is auto-flagged for review anymore; the human decides per image
+  or in one deliberate bulk action.
 - **`viewGenerate`** — the split/preprocess/augmentation form; every augmentation
   op renders from a single `AUG_DEFS` array (name, label, `check`|`range`, min, max,
   step) so adding a new op is a one-line addition, not a new form field to hand-wire.
@@ -539,14 +554,18 @@ seg_models/             SAM .pt weights (sam3.pt — the only SAM backend now)
 ### 6.3 `ImageAsset.status` state machine
 
 - `unannotated` → default; set back to this if the annotation list becomes empty.
-- `annotated` → set whenever the editor saves a non-empty annotation list, or an import/
-  merge brings one in with a classification tag.
-- `review` → set two ways: by **autolabel**, to force a human pass over model output
-  before it's trusted, and by the manual **Reject** action (editor topstrip button, or
-  the Review grid's quick-reject) — both share the same status rather than needing a
-  separate "rejected" state, so a rejected image lands right back in the "To review"
-  queue once it's fixed. Reject toggles: clicking it again on an already-`review` image
-  clears the flag back to `annotated`.
+- `annotated` → set whenever the editor saves a non-empty annotation list, an import/
+  merge brings one in with a classification tag, **or autolabel adds predictions to an
+  image** — autolabel deliberately does *not* jump straight to `review`; the freshly
+  labeled images sit here, neutral, until a human looks at them (see the auto-label
+  preview grid below).
+- `review` → set three ways, all meaning the same thing — "a human has flagged this and
+  it needs a pass through the QC queue": the manual **Reject** action (editor topstrip
+  button, or the Review grid's quick-reject), the auto-label preview grid's per-image
+  **Approve** button, and its **Approve all** bulk button. They share one status rather
+  than needing a separate "rejected"/"pending" split, so anything here lands in the same
+  "To review" queue regardless of which path put it there. Reject toggles: clicking it
+  again on an already-`review` image clears the flag back to `annotated`.
 - `approved` → set only by the explicit Approve action (editor topstrip button, or the
   Review grid's quick-approve). **Editing an approved image's annotations silently drops
   it back to `annotated`** (the save handler always recomputes status from the current

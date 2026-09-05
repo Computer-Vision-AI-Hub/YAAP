@@ -117,6 +117,23 @@ class TrainJob(Base):
     created_at = Column(DateTime, default=now)
 
 
+class AutolabelJob(Base):
+    __tablename__ = "autolabel_jobs"
+    id = Column(Integer, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    model_name = Column(String, nullable=False)
+    status = Column(String, default="running")  # running | done | failed
+    total = Column(Integer, default=0)
+    processed = Column(Integer, default=0)
+    images_labeled = Column(Integer, default=0)
+    annotations_added = Column(Integer, default=0)
+    skipped = Column(Text, default="[]")            # JSON list of filenames
+    labeled_image_ids = Column(Text, default="[]")  # JSON list — images this job actually touched
+    log = Column(Text, default="")                  # newline-joined progress lines
+    error = Column(Text, default="")
+    created_at = Column(DateTime, default=now)
+
+
 def init_db():
     Base.metadata.create_all(engine)
 

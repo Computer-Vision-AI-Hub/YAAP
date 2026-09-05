@@ -21,7 +21,7 @@ def project_or_404(db: Session, pid: int) -> Project:
 
 
 def serialize_project(p: Project) -> dict:
-    n_ann = sum(1 for im in p.images if im.status == "annotated" or im.annotations)
+    n_ann = sum(1 for im in p.images if im.status in ("annotated", "empty") or im.annotations)
     return {"id": p.id, "name": p.name, "description": p.description,
             "task_type": p.task_type, "created_at": p.created_at.isoformat(),
             "image_count": len(p.images), "annotated_count": n_ann,

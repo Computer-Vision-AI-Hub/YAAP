@@ -1,12 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from ..config import RUNS_DIR
 from ..db import DatasetVersion, TrainJob, get_db
 from ..schemas import TrainRequest
 from ..services import trainer
 from .projects import project_or_404
 
 router = APIRouter(prefix="/api/projects/{pid}/train", tags=["training"])
+
+# ultralytics writes these straight into the run dir (RUNS_DIR/job_<id>/) once
+# training finishes — see train_worker.py's project=/name= args
+PLOT_FILES = {"results": "results.png", "confusion_matrix": "confusion_matrix.png"}
 
 
 def serialize_job(j: TrainJob) -> dict:
@@ -41,6 +47,18 @@ def job_log(pid: int, jid: int, lines: int = 100, db: Session = Depends(get_db))
     j = _job(db, pid, jid)
     trainer.refresh_status(db, j)
     return {"status": j.status, "log": trainer.tail(j, lines)}
+
+
+@router.get("/{jid}/plot/{name}")
+def job_plot(pid: int, jid: int, name: str, db: Session = Depends(get_db)):
+    _job(db, pid, jid)   # 404s if this job isn't in this project
+    filename = PLOT_FILES.get(name)
+    if not filename:
+        raise HTTPException(404, "Unknown plot")
+    path = RUNS_DIR / f"job_{jid}" / filename
+    if not path.exists():
+        raise HTTPException(404, "Plot not available yet — it's written once training finishes.")
+    return FileResponse(path)
 
 
 @router.post("/{jid}/stop")

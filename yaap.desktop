@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=YAAP
+Comment=Yet Another Annotation Platform
+Exec=/home/istrazivac/LukaSiktar/YAAP/launch.sh
+Icon=/home/istrazivac/LukaSiktar/YAAP/frontend/img/yaap-logo.png
+Terminal=false
+Categories=Development;Graphics;
