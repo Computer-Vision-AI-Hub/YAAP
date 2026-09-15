@@ -15,6 +15,7 @@ class Editor {
     this.mouse = { x: 0, y: 0, ix: 0, iy: 0, down: false };
     this.draft = null;                // bbox draft {x0,y0,x1,y1}
     this.poly = null;                 // in-progress polygon points
+    this.pendingShape = null;         // finished bbox/polygon awaiting a class pick — {kind,data,anchor:[ix,iy]}
     this.drag = null;                 // {mode:'move'|'handle'|'vertex'|'pan', ...}
     this.spaceHeld = false;
     // SAM prompt state (image coords)
@@ -30,6 +31,7 @@ class Editor {
     this.img = imgEl;
     this.anns = anns.map(a => ({ ...a }));
     this.sel = -1; this.draft = null; this.poly = null; this.drag = null;
+    this.pendingShape = null;
     this.clearSam(false);
     this.fit();
   }
@@ -47,7 +49,10 @@ class Editor {
   }
 
   setTool(t) {
-    if (t !== this.tool) this.select(-1);   // switching tools ends any in-progress edit
+    if (t !== this.tool) {
+      this.select(-1);   // switching tools ends any in-progress edit
+      if (this.pendingShape) this.discardPendingShape(false);
+    }
     this.tool = t; this.poly = null; this.draft = null;
     if (t !== "sam") this.clearSam(false);
     this.draw();
@@ -208,14 +213,11 @@ class Editor {
       const w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
       this.draft = null;
       if (w > 4 && h > 4) {
-        const cls = this.opts.getActiveClass();
-        if (cls) {
-          this.anns.push({ class_id: cls.id, kind: "bbox", source: "manual", confidence: 1,
-            data: { x: this._clampX(x), y: this._clampY(y),
-                    w: Math.min(w, this.img.width - x), h: Math.min(h, this.img.height - y) } });
-          this.select(this.anns.length - 1);
-          this._dirty();
-        }
+        this.pendingShape = { kind: "bbox",
+          data: { x: this._clampX(x), y: this._clampY(y),
+                  w: Math.min(w, this.img.width - x), h: Math.min(h, this.img.height - y) },
+          anchor: [this._clampX(d.x1), this._clampY(d.y1)] };   // near where the mouse was released
+        this.opts.onPendingShape && this.opts.onPendingShape(this);
       }
     }
     if (this.drag && this.drag.mode === "vertex" && !this.drag.moved) {
@@ -248,6 +250,7 @@ class Editor {
     else if (k === "enter" && this.samPending.length) { this.opts.onSamAccept && this.opts.onSamAccept(); }
     else if (k === "escape") {
       if (this.samPts.length || this.samBox || this.samPending.length) this.clearSam();
+      else if (this.pendingShape) this.discardPendingShape();
       else { this.poly = null; this.draft = null; this.select(-1); }
     }
     else if ((k === "delete" || k === "backspace") && this.sel >= 0) {
@@ -258,16 +261,32 @@ class Editor {
 
   _closePoly() {
     if (this.poly && this.poly.length >= 3) {
-      const cls = this.opts.getActiveClass();
-      if (cls) {
-        this.anns.push({ class_id: cls.id, kind: "polygon", source: "manual",
-          confidence: 1, data: { points: this.poly } });
-        this.select(-1);           // labeled and done — don't leave it selected/editable
-        this._dirty();
-      }
+      this.pendingShape = { kind: "polygon", data: { points: this.poly },
+        anchor: this.poly[this.poly.length - 1] };   // near the last vertex placed
+      this.opts.onPendingShape && this.opts.onPendingShape(this);
     }
     this.poly = null;
     this.draw();
+  }
+
+  /* class chip picker for a freshly-drawn bbox/polygon — same pattern as
+     accepting a SAM mask, just for manual shapes (see app.js's
+     renderLabelPick, wired via opts.onPendingShape). */
+  assignPendingClass(classId) {
+    if (!this.pendingShape) return;
+    const { kind, data } = this.pendingShape;
+    this.anns.push({ class_id: classId, kind, source: "manual", confidence: 1, data });
+    this.pendingShape = null;
+    this.select(-1);
+    this._dirty();
+    this.opts.onPendingShape && this.opts.onPendingShape(this);
+    this.draw();
+  }
+
+  discardPendingShape(redraw = true) {
+    this.pendingShape = null;
+    this.opts.onPendingShape && this.opts.onPendingShape(this);
+    if (redraw) this.draw();
   }
 
   /* ── hit testing / geometry ────────────────────────────────────── */

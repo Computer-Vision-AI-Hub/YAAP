@@ -12,7 +12,19 @@ YAAP_HOME="$HOME/YAAP"
 SELF="$YAAP_HOME/yaap-launch.sh"
 COMPOSE_FILE="$YAAP_HOME/docker-compose.yml"
 WATCHER="$YAAP_HOME/watch-idle.sh"
+LOG_FILE="$YAAP_HOME/.launch.log"
 mkdir -p "$YAAP_HOME/data" "$YAAP_HOME/seg_models"
+
+# Double-clicking a .desktop icon runs this with a bare-bones environment —
+# no .bashrc/.profile sourced, so PATH may be missing wherever docker lives
+# even though it works fine from a terminal. Log everything (so a silent
+# failure is debuggable when there's no visible terminal) while still
+# printing normally when run interactively — tee, not a plain redirect.
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "── $(date) ──"
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send "YAAP" "$1" 2>/dev/null; }
+trap 'notify "Failed to start — see '"$LOG_FILE"' for details"' ERR
+notify "Starting… first run can take a few minutes (downloading the image)."
 
 # Copy myself into a stable location so the desktop shortcut always has a
 # fixed target, regardless of where this file was first downloaded to.
@@ -105,7 +117,7 @@ if [ ! -f "$DESKTOP_FILE" ]; then
 Type=Application
 Name=YAAP
 Comment=Yet Another Annotation Platform
-Exec=$SELF
+Exec=bash -lc "$SELF"
 Icon=applications-graphics
 Terminal=false
 Categories=Development;Graphics;
@@ -134,6 +146,7 @@ if ! { [ -f "$YAAP_HOME/.watcher.pid" ] && kill -0 "$(cat "$YAAP_HOME/.watcher.p
   echo $! > "$YAAP_HOME/.watcher.pid"
 fi
 
+notify "Ready — opening in your browser."
 xdg-open http://127.0.0.1:8811 2>/dev/null \
   || open http://127.0.0.1:8811 2>/dev/null \
   || echo "YAAP is up — open http://127.0.0.1:8811 in your browser."

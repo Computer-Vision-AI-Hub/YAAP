@@ -9,7 +9,11 @@ const S = { project: null, images: [], curImage: -1, editor: null, saveTimer: nu
             // navigates there (e.g. the Review grid) to control which image opens first,
             // which QC section's images to confine Prev/Next + the counter to, and
             // whether to flag already-annotated images
-            pendingImageId: null, annotateScope: null, warnIfAnnotated: false };
+            pendingImageId: null, annotateScope: null, warnIfAnnotated: false,
+            // set by viewAnnotate() while it's the active view; lets the Home button
+            // (and reaching the last image) run the same save+push-to-review confirm
+            // as the editor's own Exit button, instead of just jumping away silently
+            onLeaveAnnotate: null };
 
 /* ── plumbing ─────────────────────────────────────────────────────── */
 function toast(msg, kind = "") {
@@ -25,7 +29,14 @@ function nav(view) { location.hash = S.project ? `#/p/${S.project.id}/${view}` :
 window.addEventListener("hashchange", route);
 window.addEventListener("DOMContentLoaded", () => {
   $("#brand").onclick = () => { location.hash = "#/"; };
-  $$(".rail-btn[data-view]").forEach(b => b.onclick = () => nav(b.dataset.view));
+  // the rail's "Home" button (data-view="review") doubles as the project
+  // dashboard — while the annotator is open it owns leaving (saves, then may
+  // confirm pushing the current image to review) before landing there; every
+  // other rail button navigates straight to its view as usual.
+  $$(".rail-btn[data-view]").forEach(b => b.onclick = () => {
+    if (b.dataset.view === "review" && S.onLeaveAnnotate) return S.onLeaveAnnotate();
+    nav(b.dataset.view);
+  });
   $("#homeBtn").onclick = () => { location.hash = "#/"; };
   loadDevice();
   route();
@@ -50,6 +61,7 @@ async function loadDevice() {
 
 async function route() {
   clearInterval(S.jobPoll); clearInterval(S.verPoll);
+  S.onLeaveAnnotate = null;   // stale hook would otherwise fire against a view that's no longer live
   const m = location.hash.match(/^#\/p\/(\d+)\/(\w+)/);
   if (!m) { S.project = null; $("#rail").hidden = true; $("#topbarMid").innerHTML = ""; return viewHome(); }
   const [, pid, view] = m;
@@ -620,6 +632,7 @@ async function viewAnnotate() {
         <span class="chip warn" id="edAnnotatedWarn" hidden>⚠ already annotated</span>
         <button class="btn small" id="edReject" title="Flag this image as needing re-work">✕ Reject</button>
         <button class="btn small" id="edApprove" title="Mark this image as QC-approved">✓ Approve</button>
+        <button class="btn small ghost" id="edExit" title="Save and exit the annotator">⏏ Exit</button>
       </div>
       <div class="ed-hud" id="edHud">—</div>
     </div>
@@ -647,6 +660,7 @@ async function viewAnnotate() {
     onSamPrompt: runSamPrompt,
     onSamAccept: acceptSam,
     onSamState: updateSamStrip,
+    onPendingShape: renderLabelPick,
   });
   if (p.task_type === "segment") editor.setTool("polygon");
   if (isCls) editor.setTool("pan");
@@ -693,21 +707,27 @@ async function viewAnnotate() {
     const a = $("#samAccept"), d = $("#samDiscard");
     if (a) { a.hidden = !has; d.hidden = !has && !ed.samPts.length && !ed.samBox; }
     if (!has) samHint("click ＋ · shift-click − · drag box");
-    renderSamLabelPick();
+    renderLabelPick();
   }
 
-  /* small class picker that pops up right next to a fresh SAM mask —
-     click a class to label + accept it in one step, no sidebar detour. */
-  function renderSamLabelPick() {
+  /* small class picker that pops up right next to a fresh SAM mask, or a
+     freshly-drawn manual bbox/polygon (editor.pendingShape) — click a class
+     to label + finish it in one step, no sidebar detour either way. */
+  function renderLabelPick() {
     const box = $("#samLabelPick");
     if (!box) return;
-    if (!editor.samPending.length || !p.classes.length) { box.hidden = true; return; }
+    const pending = editor.pendingShape, mask = editor.samPending[0];
+    if (!p.classes.length || (!pending && !mask)) { box.hidden = true; return; }
     box.innerHTML = p.classes.map(c => `
       <button class="sam-label-chip" data-id="${c.id}">
         <span class="swatch" style="background:${c.color}"></span>${esc(c.name)}</button>`).join("");
-    $$(".sam-label-chip", box).forEach(b => b.onclick = () => { box.hidden = true; acceptSam(+b.dataset.id); });
-    const r0 = editor.samPending[0];
-    const [sx, sy] = editor.toScr(r0.bbox.x + r0.bbox.w / 2, r0.bbox.y);
+    if (pending) {
+      $$(".sam-label-chip", box).forEach(b => b.onclick = () => { box.hidden = true; editor.assignPendingClass(+b.dataset.id); });
+    } else {
+      $$(".sam-label-chip", box).forEach(b => b.onclick = () => { box.hidden = true; acceptSam(+b.dataset.id); });
+    }
+    const [ix, iy] = pending ? pending.anchor : [mask.bbox.x + mask.bbox.w / 2, mask.bbox.y];
+    const [sx, sy] = editor.toScr(ix, iy);
     box.hidden = false;
     box.style.left = `${sx}px`;
     box.style.top = `${Math.max(4, sy)}px`;
@@ -782,9 +802,29 @@ async function viewAnnotate() {
     } catch (e) { err(e); }
   }
 
+  // Shared by the Exit button, the Home/brand nav, and running past the last
+  // image with Next: save whatever's pending, and if the current image is
+  // now fully annotated (but not already reviewed/approved/empty), offer to
+  // push it to review before leaving. Same behavior everywhere it's called.
+  async function leaveAnnotator() {
+    await save();
+    const im = S.images[S.curImage];
+    if (im && im.status === "annotated" &&
+        confirm(`"${im.filename}" is fully annotated. Push it to review before leaving?`)) {
+      try {
+        await API.patchImage(p.id, im.id, { status: "review" });
+        im.status = "review";
+      } catch (e) { err(e); }
+    }
+    nav("review");   // land on the project's Home dashboard, not the global projects list
+  }
+  S.onLeaveAnnotate = leaveAnnotator;
+  $("#edExit").onclick = leaveAnnotator;
+
   async function go(i) {
     await save();
-    if (i < 0 || i >= S.images.length) return;
+    if (i < 0) return;
+    if (i >= S.images.length) { await leaveAnnotator(); return; }
     S.curImage = i;
     await loadImage();
   }

@@ -142,6 +142,22 @@ code,.mono{font-family:var(--font-mono)}
 .bare-note{margin-top:22px;text-align:center;color:var(--faint);font-size:13px}
 .bare-note a{color:var(--muted);text-decoration:underline}
 
+/* installation guide */
+.install-intro{color:var(--muted)}
+.guide-block{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:26px 28px;margin-bottom:18px}
+.guide-block h3{font-size:16.5px;margin-bottom:8px}
+.guide-block > p{color:var(--muted);font-size:13.5px;margin-bottom:14px;line-height:1.6}
+.guide-block a{color:var(--blue)}
+.optional{font-family:var(--font-mono);font-weight:400;font-size:11.5px;color:var(--faint)}
+.install-note{background:rgba(232,185,60,.06);border:1px solid var(--amber-dim);border-radius:8px;
+  padding:12px 14px;color:var(--muted);font-size:13px;line-height:1.6;margin-top:2px}
+.install-note code,.guide-block code{background:var(--panel-2);border:1px solid var(--line);
+  border-radius:4px;padding:1px 6px;font-size:12.5px}
+.install-links{list-style:none;display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.install-links a{text-decoration:none;font-size:13.5px}
+.install-links a:hover{text-decoration:underline}
+
 /* features */
 .feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
 @media (max-width:860px){.feat-grid{grid-template-columns:repeat(2,1fr)}}
@@ -307,6 +323,7 @@ footer .fine a{color:var(--muted);text-decoration:underline}
     <div class="eyebrow">Get it</div>
     <h2 class="section-title">Run YAAP in two minutes</h2>
     <p class="section-sub">Pull the pre-built image from Docker Hub, or clone the repo and build it yourself. Both give you the identical app at <code class="mono">http://127.0.0.1:8811</code>, with all state persisted on your own disk.</p>
+    <p class="bare-note" style="text-align:left;margin:-20px 0 30px">💡 On many Linux setups, <code class="mono">docker</code>/<code class="mono">docker compose</code> need <code class="mono">sudo</code> unless your user is already in the <code class="mono">docker</code> group — if a command below fails with a permissions error, either prefix it with <code class="mono">sudo</code>, or fix it for good with <code class="mono">sudo usermod -aG docker $USER</code> (then log out and back in).</p>
 
     <div class="get-grid">
       <div class="get-card">
@@ -403,6 +420,73 @@ bash yaap-portable-launch.sh">copy</button>
     <p class="bare-note">Prefer bare Python? <code class="mono">pip install -r requirements.txt && python run.py</code> — see the <a href="https://github.com/Computer-Vision-AI-Hub/YAAP#quick-start--bare-python" target="_blank" rel="noopener">README</a> for the CUDA-matched torch install step.</p>
   </section>
 
+  <section class="wrap" id="install-guide">
+    <div class="eyebrow">Prerequisites</div>
+    <h2 class="section-title">Installation guide</h2>
+    <p class="section-sub install-intro">Everything a fresh Ubuntu machine needs before the commands above will work. Already have Docker (and a GPU driver, if you want one)? You can skip this.</p>
+
+    <div class="guide-block">
+      <h3>1. Install Docker Engine</h3>
+      <p>Lets you pull and run the container images on this page. Official instructions (all distros): <a href="https://docs.docker.com/engine/install/ubuntu/" target="_blank" rel="noopener">docs.docker.com/engine/install/ubuntu</a></p>
+      <div class="code-block">
+        <pre>sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release &amp;&amp; echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list &gt; /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker $USER</pre>
+        <button class="copy-btn" data-copy="sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo &quot;deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release &amp;&amp; echo &quot;$VERSION_CODENAME&quot;) stable&quot; | sudo tee /etc/apt/sources.list.d/docker.list &gt; /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker $USER">copy</button>
+      </div>
+      <p class="install-note">The last line lets you run <code>docker</code> without <code>sudo</code> — log out and back in (or run <code>newgrp docker</code>) for it to take effect.</p>
+    </div>
+
+    <div class="guide-block">
+      <h3>2. Install the NVIDIA driver / CUDA <span class="optional">— optional, only if you have an NVIDIA GPU</span></h3>
+      <p>The Container Toolkit (next step) needs the GPU driver already installed on the host. The right package depends on your exact GPU and Ubuntu version, so the quickest safe start is Ubuntu's own driver detector:</p>
+      <div class="code-block">
+        <pre>sudo ubuntu-drivers autoinstall</pre>
+        <button class="copy-btn" data-copy="sudo ubuntu-drivers autoinstall">copy</button>
+      </div>
+      <p class="install-note">Reboot afterwards, then check it worked with <code>nvidia-smi</code>. For a specific GPU/driver version, a manual CUDA Toolkit install, or non-Ubuntu setups, use the official resources instead:</p>
+      <ul class="install-links">
+        <li><a href="https://ubuntu.com/server/docs/nvidia-drivers-installation" target="_blank" rel="noopener">Ubuntu — NVIDIA driver installation guide →</a></li>
+        <li><a href="https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html" target="_blank" rel="noopener">NVIDIA — CUDA Installation Guide for Linux →</a></li>
+        <li><a href="https://developer.nvidia.com/cuda-downloads" target="_blank" rel="noopener">NVIDIA — CUDA Toolkit downloads (pick your OS for exact commands) →</a></li>
+      </ul>
+    </div>
+
+    <div class="guide-block">
+      <h3>3. Install the NVIDIA Container Toolkit <span class="optional">— optional, for GPU acceleration</span></h3>
+      <p>Only needed if you have an NVIDIA GPU and want faster inference. Requires the driver from step 2. Official instructions: <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#installing-the-nvidia-container-toolkit" target="_blank" rel="noopener">NVIDIA Container Toolkit install guide</a></p>
+      <div class="code-block">
+        <pre>curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker</pre>
+        <button class="copy-btn" data-copy="curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker">copy</button>
+      </div>
+      <p class="install-note">Once installed, add <code>--gpus all</code> to any <code>docker run</code> command on this page to use the GPU.</p>
+    </div>
+  </section>
+
   <section class="wrap" id="features">
     <div class="eyebrow">Features</div>
     <h2 class="section-title">Everything from first click to trained model</h2>
@@ -439,11 +523,20 @@ bash yaap-portable-launch.sh">copy</button>
       </table>
       <div class="sam-warn">
         <span class="ico">⚠️</span>
-        <p><b style="color:var(--text)">SAM 3 weights are gated by Meta</b> — they don't auto-download like the
-          YOLO/RT-DETR weights do. Request access on the
-          <a href="https://huggingface.co/facebook/sam3" target="_blank" rel="noopener">SAM 3 Hugging Face page</a>,
-          wait for approval, then authenticate with <code class="mono">hf auth login</code> before first use
-          (or download the checkpoint yourself once approved and drop it into <code class="mono">seg_models/</code>).</p>
+        <div>
+          <p><b style="color:var(--text)">SAM 3 weights are gated by Meta</b> — unlike YOLO/RT-DETR, YAAP's
+            Docker image can't legally bundle or auto-download them for you. Request access on the
+            <a href="https://huggingface.co/facebook/sam3" target="_blank" rel="noopener">SAM 3 Hugging Face page</a>
+            (usually approved within a day), then either authenticate with <code class="mono">hf auth login</code>
+            and pull it via the CLI, or just download the checkpoint straight from the Hugging Face website —
+            no Python or CLI tools needed on your host either way.</p>
+          <p style="margin-top:8px">Running everything through Docker? Save the file as
+            <code class="mono">sam3.pt</code> in whichever host folder is bind-mounted as
+            <code class="mono">seg_models/</code> — <code class="mono">~/YAAP/seg_models/</code> for the
+            portable launcher, or <code class="mono">./seg_models/</code> next to your
+            <code class="mono">docker-compose.yml</code> if you cloned the repo. No container restart
+            needed — just try SAM in the UI again and it picks the file up.</p>
+        </div>
       </div>
     </div>
   </section>
