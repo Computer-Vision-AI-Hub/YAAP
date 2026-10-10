@@ -1,4 +1,3 @@
-# ── YAAP — Yet Another Annotation Platform ──────────────────────────
 # Core web stack
 fastapi>=0.111
 uvicorn[standard]>=0.30

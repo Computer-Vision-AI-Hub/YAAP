@@ -48,6 +48,16 @@ class InferenceRequest(BaseModel):
     class_filter: list[str] = []    # keep only these model class names, empty = all
 
 
+class TestModelRequest(BaseModel):
+    version_id: int
+    model_name: str
+    conf: float = 0.4
+    iou: float = 0.5
+    device: str = "auto"
+    limit: int = 20
+    offset: int = 0
+
+
 class AugmentPreviewRequest(BaseModel):
     image_id: int
     ops: dict[str, Any] = {}

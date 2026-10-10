@@ -4,7 +4,7 @@
 set -e
 if [ -n "$PRELOAD_MODELS" ]; then
   echo "[yaap] preloading models: $PRELOAD_MODELS"
-  python - << 'PY' || echo "[yaap] preload failed (no network?) — continuing; upload .pt files via the UI."
+  python3 - << 'PY' || echo "[yaap] preload failed (no network?) — continuing; upload .pt files via the UI."
 import os
 names = os.environ.get("PRELOAD_MODELS", "").split()
 if names:

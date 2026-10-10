@@ -85,12 +85,21 @@ class Editor {
     }, { passive: false });
 
     cv.addEventListener("mousedown", e => this._down(e));
-    window.addEventListener("mousemove", e => this._move(e));
-    window.addEventListener("mouseup", e => this._up(e));
     cv.addEventListener("dblclick", () => { if (this.poly) this._closePoly(); });
-    window.addEventListener("keydown", e => this._key(e));
-    window.addEventListener("keyup", e => { if (e.code === "Space") this.spaceHeld = false; });
-    new ResizeObserver(() => this.fit()).observe(cv.parentElement);
+    // window-level listeners outlive the canvas — tied to one signal so destroy() drops them all
+    this._ac = new AbortController();
+    const signal = this._ac.signal;
+    window.addEventListener("mousemove", e => this._move(e), { signal });
+    window.addEventListener("mouseup", e => this._up(e), { signal });
+    window.addEventListener("keydown", e => this._key(e), { signal });
+    window.addEventListener("keyup", e => { if (e.code === "Space") this.spaceHeld = false; }, { signal });
+    this._ro = new ResizeObserver(() => this.fit());
+    this._ro.observe(cv.parentElement);
+  }
+
+  destroy() {
+    this._ac.abort();
+    this._ro.disconnect();
   }
 
   _pos(e) {

@@ -199,7 +199,7 @@ code,.mono{font-family:var(--font-mono)}
 .tl-body p{color:var(--muted);font-size:13.5px}
 .tl-body code{background:var(--panel-2);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:12.5px}
 
-/* screenshots */
+/* tutorials */
 .shot-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
 @media (max-width:700px){.shot-grid{grid-template-columns:1fr}}
 .shot{aspect-ratio:16/10;border:2px dashed var(--line);border-radius:10px;
@@ -207,6 +207,9 @@ code,.mono{font-family:var(--font-mono)}
   color:var(--faint);background:var(--panel)}
 .shot .ico{font-size:26px;opacity:.6}
 .shot span{font-size:13px;font-family:var(--font-mono)}
+.video{margin:0;display:flex;flex-direction:column;gap:8px}
+.video iframe{width:100%;aspect-ratio:16/9;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.video figcaption{font-size:13px;font-family:var(--font-mono);color:var(--faint);text-align:center}
 .shot-note{text-align:center;color:var(--faint);font-size:13px;margin-top:20px}
 
 /* CVAIH callout */
@@ -251,15 +254,15 @@ footer .fine a{color:var(--muted);text-decoration:underline}
       </a>
     </div>
     <div class="nav-links">
+      <a href="#get-it">Get it</a>
       <a href="#features">Features</a>
       <a href="#sam">SAM assist</a>
       <a href="#workflow">Workflow</a>
-      <a href="#get-it">Get it</a>
-      <a href="#screenshots">Screenshots</a>
+      <a href="#tutorials">Tutorials</a>
     </div>
     <div class="nav-cta">
       <a class="btn small" href="https://github.com/Computer-Vision-AI-Hub/YAAP" target="_blank" rel="noopener">GitHub</a>
-      <a class="btn small primary" href="https://hub.docker.com/r/lukasiktar/yaap" target="_blank" rel="noopener">Docker Hub</a>
+      <a class="btn small primary" href="https://hub.docker.com/r/computervisionaihub/yaap" target="_blank" rel="noopener">Docker Hub</a>
     </div>
   </div>
 </nav>
@@ -286,46 +289,47 @@ footer .fine a{color:var(--muted);text-decoration:underline}
       <img src="https://img.shields.io/badge/license-MIT-E8B93C" alt="MIT License">
       <img src="https://img.shields.io/badge/backbone-YOLO%20%7C%20RT--DETR%20%7C%20SAM%203-22D3C7" alt="YOLO RT-DETR SAM3">
       <img src="https://img.shields.io/badge/data-100%25%20local-6FB4FF" alt="100% local">
-      <img src="https://img.shields.io/docker/pulls/lukasiktar/yaap?label=docker%20pulls&color=2496ED" alt="Docker pulls">
+      <img src="https://img.shields.io/docker/pulls/computervisionaihub/yaap?label=docker%20pulls&color=2496ED" alt="Docker pulls">
     </div>
     <div class="flow">
       <span class="step">Upload</span><span class="arrow">→</span>
-      <span class="step">SAM-assisted annotation</span><span class="arrow">→</span>
-      <span class="step">Auto-label</span><span class="arrow">→</span>
+      <span class="step">SAM-assisted annotation / Auto-label</span><span class="arrow">→</span>
       <span class="step">Generate version</span><span class="arrow">→</span>
       <span class="step">Export / Train</span>
     </div>
   </div>
 </header>
 
-<main>
-  <section class="wrap">
-    <div class="why">
-      <div class="card">
-        <div class="ico">🔒</div>
-        <h3>No accounts, no telemetry, no cloud</h3>
-        <p>Storage is a SQLite DB plus plain folders under <code class="mono">data/</code>. Delete the folder and the data is gone — nothing is phoned home.</p>
-      </div>
-      <div class="card">
-        <div class="ico">🖥️</div>
-        <h3>Binds to 127.0.0.1</h3>
-        <p>The web UI is not reachable from the network by default. Put a reverse proxy in front if you deliberately want LAN access.</p>
-      </div>
-      <div class="card">
-        <div class="ico">✈️</div>
-        <h3>Air-gapped capable</h3>
-        <p>The only outbound traffic is downloading model weights the first time. Supply <code class="mono">.pt</code> files yourself and it never calls out.</p>
-      </div>
-    </div>
-  </section>
-
+<main> 
   <section class="wrap" id="get-it">
     <div class="eyebrow">Get it</div>
     <h2 class="section-title">Run YAAP in two minutes</h2>
-    <p class="section-sub">Pull the pre-built image from Docker Hub, or clone the repo and build it yourself. Both give you the identical app at <code class="mono">http://127.0.0.1:8811</code>, with all state persisted on your own disk.</p>
-    <p class="bare-note" style="text-align:left;margin:-20px 0 30px">💡 On many Linux setups, <code class="mono">docker</code>/<code class="mono">docker compose</code> need <code class="mono">sudo</code> unless your user is already in the <code class="mono">docker</code> group — if a command below fails with a permissions error, either prefix it with <code class="mono">sudo</code>, or fix it for good with <code class="mono">sudo usermod -aG docker $USER</code> (then log out and back in).</p>
+    <!-- <p class="section-sub">Pull the pre-built image from Docker Hub, or clone the repo and build it yourself. Both give you the identical app at <code class="mono">http://127.0.0.1:8811</code>, with all state persisted on your own disk.</p> -->
+    <!-- <p class="bare-note" style="text-align:left;margin:-20px 0 30px">💡 On many Linux setups, <code class="mono">docker</code>/<code class="mono">docker compose</code> need <code class="mono">sudo</code> unless your user is already in the <code class="mono">docker</code> group — if a command below fails with a permissions error, either prefix it with <code class="mono">sudo</code>, or fix it for good with <code class="mono">sudo usermod -aG docker $USER</code> (then log out and back in).</p> -->
+    
+    <div class="get-card featured" style="margin-top:20px">
+      <div class="gh-title">
+        <span style="font-size:20px">⚡</span>
+        <h3>Fastest — portable launcher</h3>
+      </div>
+      <p class="desc">No git clone, no manual <code class="mono">docker run</code> flags. One script
+        pulls the right image, sets up persistent storage under <code class="mono">~/YAAP</code>,
+        and installs a desktop shortcut — from then on, just click the icon.</p>
+      <div class="tag-row">
+        <span class="pill gpu">auto-detects GPU</span>
+        <span class="pill cpu">falls back to CPU</span>
+      </div>
+      <div class="code-block">
+        <pre><span class="cm"># grab it, then run it once</span>
+    curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
+    bash yaap-portable-launch.sh</pre>
+        <button class="copy-btn" data-copy="curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
+    bash yaap-portable-launch.sh">copy</button>
+      </div>
+      <div class="foot-link">Want to read it first? <a href="yaap-portable-launch.sh" target="_blank" rel="noopener"> <a href="yaap-portable-launch.sh" download>⬇ download it</a> without running anything.</div> 
+    </div>
 
-    <div class="get-grid">
+    <div class="get-grid" style="margin-top:20px">
       <div class="get-card">
         <div class="gh-title">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.36 1.09 2.93.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.4 9.4 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></svg>
@@ -356,65 +360,43 @@ docker compose up --build">copy</button>
         </div>
         <p class="desc">Skip the build — pull the published image straight from Docker Hub and run it.</p>
         <div class="tag-row">
-          <span class="pill gpu">lukasiktar/yaap:gpu</span>
-          <span class="pill cpu">lukasiktar/yaap:cpu</span>
+          <span class="pill gpu">computervisionaihub/yaap:gpu</span>
+          <span class="pill cpu">computervisionaihub/yaap:cpu</span>
         </div>
         <div class="code-block">
           <pre><span class="cm"># GPU image</span>
-docker pull lukasiktar/yaap:gpu
+docker pull computervisionaihub/yaap:gpu
 docker run -d --name yaap --gpus all \
   -p 127.0.0.1:8811:8811 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/seg_models:/app/seg_models \
   --shm-size=8gb \
-  lukasiktar/yaap:gpu</pre>
-          <button class="copy-btn" data-copy="docker pull lukasiktar/yaap:gpu
+  computervisionaihub/yaap:gpu</pre>
+          <button class="copy-btn" data-copy="docker pull computervisionaihub/yaap:gpu
 docker run -d --name yaap --gpus all \
   -p 127.0.0.1:8811:8811 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/seg_models:/app/seg_models \
   --shm-size=8gb \
-  lukasiktar/yaap:gpu">copy</button>
+  computervisionaihub/yaap:gpu">copy</button>
         </div>
         <div class="code-block">
           <pre><span class="cm"># CPU image (no GPU on this machine)</span>
-docker pull lukasiktar/yaap:cpu
+docker pull computervisionaihub/yaap:cpu
 docker run -d --name yaap-cpu \
   -p 127.0.0.1:8811:8811 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/seg_models:/app/seg_models \
-  lukasiktar/yaap:cpu</pre>
-          <button class="copy-btn" data-copy="docker pull lukasiktar/yaap:cpu
+  computervisionaihub/yaap:cpu</pre>
+          <button class="copy-btn" data-copy="docker pull computervisionaihub/yaap:cpu
 docker run -d --name yaap-cpu \
   -p 127.0.0.1:8811:8811 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/seg_models:/app/seg_models \
-  lukasiktar/yaap:cpu">copy</button>
+  computervisionaihub/yaap:cpu">copy</button>
         </div>
-        <div class="foot-link">Image + tags on <a href="https://hub.docker.com/r/lukasiktar/yaap" target="_blank" rel="noopener">Docker Hub →</a></div>
+        <div class="foot-link">Image + tags on <a href="https://hub.docker.com/r/computervisionaihub/yaap" target="_blank" rel="noopener">Docker Hub →</a></div>
       </div>
-    </div>
-
-    <div class="get-card featured" style="margin-top:20px">
-      <div class="gh-title">
-        <span style="font-size:20px">⚡</span>
-        <h3>Fastest — portable launcher</h3>
-      </div>
-      <p class="desc">No git clone, no manual <code class="mono">docker run</code> flags. One script
-        pulls the right image, sets up persistent storage under <code class="mono">~/YAAP</code>,
-        and installs a desktop shortcut — from then on, just click the icon.</p>
-      <div class="tag-row">
-        <span class="pill gpu">auto-detects GPU</span>
-        <span class="pill cpu">falls back to CPU</span>
-      </div>
-      <div class="code-block">
-        <pre><span class="cm"># grab it, then run it once</span>
-curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
-bash yaap-portable-launch.sh</pre>
-        <button class="copy-btn" data-copy="curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
-bash yaap-portable-launch.sh">copy</button>
-      </div>
-      <div class="foot-link">Want to read it first? <a href="yaap-portable-launch.sh" target="_blank" rel="noopener">view the script</a> or <a href="yaap-portable-launch.sh" download>⬇ download it</a> without running anything.</div>
     </div>
 
     <p class="bare-note">Prefer bare Python? <code class="mono">pip install -r requirements.txt && python run.py</code> — see the <a href="https://github.com/Computer-Vision-AI-Hub/YAAP#quick-start--bare-python" target="_blank" rel="noopener">README</a> for the CUDA-matched torch install step.</p>
@@ -487,6 +469,30 @@ sudo systemctl restart docker">copy</button>
     </div>
   </section>
 
+  <section class="wrap" id="devices">
+    <div class="eyebrow">Devices</div>
+    <h2 class="section-title">Where YAAP runs</h2>
+    <p class="section-sub">YAAP runs anywhere Docker runs. The only thing that changes between machines is whether you get GPU acceleration.</p>
+    <div class="why">
+      <div class="card">
+        <div class="ico">🐧</div>
+        <h3>Linux + NVIDIA GPU</h3>
+        <p>Full speed. Use the <code>:gpu</code> image (or plain <code>docker compose up</code>) with the NVIDIA driver and Container Toolkit from the guide above. The portable launcher picks this automatically when it finds <code>nvidia-smi</code>.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🪟</div>
+        <h3>Windows</h3>
+        <p>Run through Docker Desktop with the WSL2 backend. With an NVIDIA GPU and an up-to-date Windows driver, the <code>:gpu</code> image works as on Linux. Without one, use <code>:cpu</code>. The portable launcher is Linux-only, so use the <code>docker run</code> commands instead.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🍎</div>
+        <h3>macOS</h3>
+        <p>CPU only. Docker on Mac (Apple Silicon or Intel) can't pass a GPU through to containers, so use the <code>:cpu</code> image or <code>docker compose --profile cpu up yaap-cpu</code>. Annotating, SAM and auto-labeling all work, just slower; training is best done in Google Colab.</p>
+      </div>
+    </div>
+    <p class="install-note" style="margin-top:18px">One machine at a time: YAAP listens on <code>127.0.0.1</code> only, so other devices on your network can't open it. Each device that runs YAAP keeps its own <code>data/</code> folder. To move a project between machines, export it as a zip from one and import it on the other.</p>
+  </section>
+
   <section class="wrap" id="features">
     <div class="eyebrow">Features</div>
     <h2 class="section-title">Everything from first click to trained model</h2>
@@ -557,15 +563,27 @@ sudo systemctl restart docker">copy</button>
     </div>
   </section>
 
-  <section class="wrap" id="screenshots">
-    <div class="eyebrow">Screenshots</div>
+  <section class="wrap" id="tutorials">
+    <div class="eyebrow">tutorials</div>
     <h2 class="section-title">See it in action</h2>
-    <p class="section-sub">Gallery is on its way — drop images into <code class="mono">docs/img/</code> and swap these placeholders for real captures.</p>
+    <p class="section-sub">Short walkthroughs of the main workflows.</p>
     <div class="shot-grid">
-      <div class="shot"><div class="ico">🖼️</div><span>annotation editor</span></div>
-      <div class="shot"><div class="ico">✦</div><span>SAM-assisted labeling</span></div>
-      <div class="shot"><div class="ico">⚡</div><span>auto-label review queue</span></div>
-      <div class="shot"><div class="ico">📦</div><span>dataset versions &amp; export</span></div>
+      <figure class="video">
+        <iframe src="https://www.youtube-nocookie.com/embed/0NMpTCFESp4" title="Tutorial 1: How to create a project" loading="lazy" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+        <figcaption>how to create a project</figcaption>
+      </figure>
+      <figure class="video">
+        <iframe src="https://www.youtube-nocookie.com/embed/LDZdjK5gPoo" title="Tutorial 2: Manage and annotate dataset" loading="lazy" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+        <figcaption>how to manage and annotate dataset</figcaption>
+      </figure>
+      <figure class="video">
+        <iframe src="https://www.youtube-nocookie.com/embed/TANUYhsW7no" title="Tutorial 3: Using SAM and annotation approval" loading="lazy" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+        <figcaption>how to use SAM and annotation approval</figcaption>
+      </figure>
+      <figure class="video">
+        <iframe src="https://www.youtube-nocookie.com/embed/VIDEO_ID_4" title="Dataset versions and export" loading="lazy" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+        <figcaption>dataset versions &amp; export</figcaption>
+      </figure>
     </div>
     <p class="shot-note">More to come as the platform gets used in real projects.</p>
   </section>
@@ -599,7 +617,7 @@ sudo systemctl restart docker">copy</button>
           <h4>Project</h4>
           <ul>
             <li><a href="https://github.com/Computer-Vision-AI-Hub/YAAP" target="_blank" rel="noopener">GitHub</a></li>
-            <li><a href="https://hub.docker.com/r/lukasiktar/yaap" target="_blank" rel="noopener">Docker Hub</a></li>
+            <li><a href="https://hub.docker.com/r/computervisionaihub/yaap" target="_blank" rel="noopener">Docker Hub</a></li>
             <li><a href="https://github.com/Computer-Vision-AI-Hub/YAAP/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
             <li><a href="https://github.com/Computer-Vision-AI-Hub/YAAP/blob/main/DOCUMENTATION.md" target="_blank" rel="noopener">Full documentation</a></li>
           </ul>

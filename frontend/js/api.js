@@ -48,6 +48,7 @@ const API = {
   autolabel:        (pid, b)   => API._j(`/api/projects/${pid}/autolabel`, { method: "POST", body: JSON.stringify(b) }),
   autolabelJob:     (pid, jid) => API._j(`/api/projects/${pid}/autolabel/${jid}`),
   autolabelPreview: (pid, jid) => API._j(`/api/projects/${pid}/autolabel/${jid}/preview`),
+  testModel: (pid, b)          => API._j(`/api/projects/${pid}/test-model`, { method: "POST", body: JSON.stringify(b) }),
   device:    ()                => API._j("/api/system/device"),
   async uploadWeight(file, task, pid) {
     const fd = new FormData(); fd.append("file", file);

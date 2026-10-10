@@ -1,9 +1,10 @@
 import shutil
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import case, exists, func, or_
+from sqlalchemy.orm import Session, selectinload
 
-from ..db import LabelClass, Project, get_db
+from ..db import Annotation, DatasetVersion, ImageAsset, LabelClass, Project, get_db
 from ..schemas import ClassCreate, ClassUpdate, ProjectCreate
 from ..services import storage
 
@@ -20,13 +21,31 @@ def project_or_404(db: Session, pid: int) -> Project:
     return p
 
 
-def serialize_project(p: Project) -> dict:
-    n_ann = sum(1 for im in p.images if im.status in ("annotated", "empty") or im.annotations)
-    return {"id": p.id, "name": p.name, "description": p.description,
-            "task_type": p.task_type, "created_at": p.created_at.isoformat(),
-            "image_count": len(p.images), "annotated_count": n_ann,
-            "class_count": len(p.classes), "version_count": len(p.versions),
-            "classes": [serialize_class(c) for c in p.classes]}
+def _project_counts(db: Session, pids: list[int]) -> dict[int, dict]:
+    """Per-project image/labeled/version counts, aggregated in SQL — a fixed
+    number of queries no matter how many projects or images there are."""
+    out = {pid: {"images": 0, "annotated": 0, "versions": 0} for pid in pids}
+    labeled = or_(ImageAsset.status.in_(("annotated", "empty")),
+                  exists().where(Annotation.image_id == ImageAsset.id))
+    for pid, n, n_ann in (db.query(ImageAsset.project_id, func.count(ImageAsset.id),
+                                   func.sum(case((labeled, 1), else_=0)))
+                          .filter(ImageAsset.project_id.in_(pids))
+                          .group_by(ImageAsset.project_id)):
+        out[pid].update(images=n, annotated=int(n_ann or 0))
+    for pid, n in (db.query(DatasetVersion.project_id, func.count(DatasetVersion.id))
+                   .filter(DatasetVersion.project_id.in_(pids))
+                   .group_by(DatasetVersion.project_id)):
+        out[pid]["versions"] = n
+    return out
+
+
+def serialize_projects(db: Session, projects: list[Project]) -> list[dict]:
+    counts = _project_counts(db, [p.id for p in projects])
+    return [{"id": p.id, "name": p.name, "description": p.description,
+             "task_type": p.task_type, "created_at": p.created_at.isoformat(),
+             "image_count": counts[p.id]["images"], "annotated_count": counts[p.id]["annotated"],
+             "class_count": len(p.classes), "version_count": counts[p.id]["versions"],
+             "classes": [serialize_class(c) for c in p.classes]} for p in projects]
 
 
 def serialize_class(c: LabelClass) -> dict:
@@ -35,7 +54,9 @@ def serialize_class(c: LabelClass) -> dict:
 
 @router.get("")
 def list_projects(db: Session = Depends(get_db)):
-    return [serialize_project(p) for p in db.query(Project).order_by(Project.created_at.desc())]
+    projects = (db.query(Project).options(selectinload(Project.classes))
+                .order_by(Project.created_at.desc()).all())
+    return serialize_projects(db, projects)
 
 
 @router.post("")
@@ -44,12 +65,12 @@ def create_project(body: ProjectCreate, db: Session = Depends(get_db)):
                 task_type=body.task_type)
     db.add(p); db.commit()
     storage.project_dir(p.id)
-    return serialize_project(p)
+    return serialize_projects(db, [p])[0]
 
 
 @router.get("/{pid}")
 def get_project(pid: int, db: Session = Depends(get_db)):
-    return serialize_project(project_or_404(db, pid))
+    return serialize_projects(db, [project_or_404(db, pid)])[0]
 
 
 @router.delete("/{pid}")

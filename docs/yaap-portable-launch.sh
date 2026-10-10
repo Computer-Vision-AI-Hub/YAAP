@@ -1,6 +1,6 @@
 #!/bin/bash
 # YAAP portable launcher — works on any Linux device with Docker installed,
-# no repo checkout needed. Pulls the published lukasiktar/yaap image, keeps
+# no repo checkout needed. Pulls the published computervisionaihub/yaap image, keeps
 # data under ~/YAAP, auto-detects GPU vs CPU, and installs its own desktop
 # shortcut the first time it runs.
 #
@@ -36,7 +36,7 @@ fi
 # Generate the compose file once — never overwrite later manual edits.
 if [ ! -f "$COMPOSE_FILE" ]; then
   if command -v nvidia-smi >/dev/null 2>&1; then
-    IMAGE="lukasiktar/yaap:latest"
+    IMAGE="computervisionaihub/yaap:latest"
     cat > "$COMPOSE_FILE" << EOF
 services:
   yaap:
@@ -60,7 +60,7 @@ services:
               capabilities: [gpu]
 EOF
   else
-    IMAGE="lukasiktar/yaap:cpu"
+    IMAGE="computervisionaihub/yaap:cpu"
     cat > "$COMPOSE_FILE" << EOF
 services:
   yaap:

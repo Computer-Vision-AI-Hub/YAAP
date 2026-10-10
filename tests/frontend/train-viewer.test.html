@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>train-viewer</title>
+<script src="harness.js"></script>
+<script>
+// Train view: full-screen log and plots, plot reloading, and the shared
+// viewer's close paths.
+test(async t => {
+  const PROJECT = { id: 1, name: "P", task_type: "detect", image_count: 1, annotated_count: 1,
+    classes: [{ id: 1, name: "cat", color: "#f00" }] };
+  let status = "running";
+  const logRequests = [];
+  await t.boot({ routes: [
+    ["GET", /\/api\/projects$/, () => []],
+    ["GET", /\/api\/projects\/1$/, () => PROJECT],
+    ["GET", /\/versions$/, () => [{ id: 1, name: "v1", status: "ready" }]],
+    ["GET", /\/api\/models/, () => ({ weights: [], pretrained: ["yolo11n.pt"], rtdetr: [], rfdetr_available: false, rfdetr: [] })],
+    ["GET", /\/train\/\d+\/log/, url => { logRequests.push(url);
+      return { status, log: Array.from({ length: 300 }, (_, i) => `line ${i}`).join("\n") }; }],
+    ["GET", /\/train$/, () => [{ id: 7, status, model_arch: "yolo11n.pt", version_id: 1 }]],
+  ] });
+
+  // count plot reloads by watching the two plot <img> src setters
+  let plotLoads = 0;
+  const desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  Object.defineProperty(HTMLImageElement.prototype, "src", {
+    set(v) { if (this.id?.startsWith("jobPlot")) plotLoads++; desc.set.call(this, v); },
+    get() { return desc.get.call(this); },
+  });
+  const viewer = document.querySelector("#viewer");
+
+  await t.go("#/p/1/train");
+  document.querySelector('[data-log="7"]').click(); await t.sleep(80);
+  t.check("inline log shows", document.querySelector("#jobLog").style.display === "block");
+  t.check("inline log asks for 200 lines", /lines=200/.test(logRequests.at(-1)), logRequests.at(-1));
+
+  document.querySelector("#jobLogFull").click(); await t.sleep(80);
+  t.check("log opens full screen", viewer.open && !!document.querySelector("#viewerLog"));
+  t.check("full-screen log asks for 5000 lines", /lines=5000/.test(logRequests.at(-1)), logRequests.at(-1));
+  t.check("full-screen log has the latest lines", document.querySelector("#viewerLog").textContent.includes("line 299"));
+  t.check("full-screen log fills the screen", document.querySelector("#viewerLog").getBoundingClientRect().height > innerHeight * 0.7);
+  document.querySelector("#viewerClose").click();
+  t.check("Close closes and empties the viewer", !viewer.open && document.querySelector("#viewerBody").innerHTML === "");
+
+  document.querySelector("#jobPlotResults").click(); await t.sleep(30);
+  t.check("results.png opens full screen", viewer.open && !!document.querySelector("#viewerBody .viewer-img"));
+  document.querySelector("#viewerBody .viewer-img").click();
+  t.check("clicking the image toggles actual size", document.querySelector("#viewerBody .viewer-img").classList.contains("actual"));
+  document.querySelector("#viewerBody").classList.remove("scroll");   // so the click below lands on the body
+  document.querySelector("#viewerBody").click();
+  t.check("clicking the dark area closes it", !viewer.open);
+
+  // finished job: plots load once, then stop reloading on every poll
+  status = "done";
+  let before = plotLoads;
+  document.querySelector('[data-log="7"]').click(); await t.sleep(80);
+  t.check("plots reload when the job finishes", plotLoads - before === 2, plotLoads - before);
+  before = plotLoads;
+  document.querySelector('[data-log="7"]').click(); await t.sleep(80);
+  t.check("finished job's plots don't reload again", plotLoads === before, plotLoads - before);
+
+  // a late async "close" event must not wipe a viewer that was reopened meanwhile
+  document.querySelector("#jobPlotResults").click();
+  viewer.close();
+  document.querySelector("#jobPlotResults").click(); await t.sleep(200);
+  t.check("reopened viewer survives the late close event", viewer.open && !!document.querySelector("#viewerBody .viewer-img"));
+
+  await t.go("#/p/1/classes");
+  t.check("navigating away closes the viewer", !viewer.open);
+  clearInterval(S.jobPoll);
+});
+</script>

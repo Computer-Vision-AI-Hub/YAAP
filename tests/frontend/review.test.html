@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>review</title>
+<script src="harness.js"></script>
+<script>
+// QC statuses: rejected images live only under "Needs re-annotation", fixed or
+// auto-label-approved ones under "To review" — never both (DOCUMENTATION.md §6.3).
+test(async t => {
+  const PROJECT = { id: 1, name: "P", task_type: "detect", image_count: 4, annotated_count: 4,
+    classes: [{ id: 1, name: "cat", color: "#f00" }] };
+  const IMAGES = [
+    { id: 1, filename: "a.png", status: "annotated" },
+    { id: 2, filename: "b.png", status: "needs_reannotation" },
+    { id: 3, filename: "c.png", status: "review" },          // approved out of auto-label
+    { id: 4, filename: "d.png", status: "approved" },
+  ].map(x => ({ width: 100, height: 100, annotation_count: 1, split: "", ...x }));
+  const patches = [];
+  await t.boot({ routes: [
+    ["GET", /\/api\/projects$/, () => []],
+    ["GET", /\/api\/projects\/1$/, () => PROJECT],
+    ["GET", /\/images$/, () => IMAGES.map(x => ({ ...x }))],
+    ["GET", /\/images\/\d+\/annotations$/, () => []],
+    ["PATCH", /\/images\/(\d+)$/, (url, body) => {
+      const id = +url.match(/images\/(\d+)$/)[1];
+      patches.push({ id, status: body.status });
+      const im = IMAGES.find(x => x.id === id); im.status = body.status;
+      return { ...im };
+    }],
+  ] });
+
+  const inBucket = (status, f) => qcMatch({ status }, f);
+  t.check("rejected is not in To review", !inBucket("needs_reannotation", "reviewable"));
+  t.check("rejected is in Needs re-annotation", inBucket("needs_reannotation", "needs_reannotation"));
+  t.check("fixed (annotated) is in To review", inBucket("annotated", "reviewable"));
+  t.check("auto-label-approved (review) is in To review", inBucket("review", "reviewable"));
+  t.check("auto-annotated is in To review", inBucket("auto-annotated", "reviewable"));
+  t.check("empty is in To review", inBucket("empty", "reviewable"));
+  t.check("approved is not in To review", !inBucket("approved", "reviewable"));
+  t.check("unannotated is not in To review", !inBucket("unannotated", "reviewable"));
+
+  // every status lands in at most one of the two queues
+  for (const s of ["unannotated", "annotated", "auto-annotated", "review", "needs_reannotation", "empty", "approved"])
+    t.check(`"${s}" is never in both queues`, !(inBucket(s, "reviewable") && inBucket(s, "needs_reannotation")));
+
+  // ── Review grid chip counts
+  S.qcFilter = "needs_reannotation";
+  await t.go("#/p/1/review");
+  const count = f => +document.querySelector(`#qcFilters [data-f="${f}"] .mono`).textContent;
+  t.check("To review count", count("reviewable") === 2, count("reviewable"));
+  t.check("Needs re-annotation count", count("needs_reannotation") === 1, count("needs_reannotation"));
+
+  // ── ✕ on an already-rejected image in the grid clears it back to annotated
+  document.querySelector('[data-reject="2"]').click(); await t.sleep(50);
+  t.check("✕ on a rejected image clears it to annotated",
+    patches.at(-1)?.id === 2 && patches.at(-1)?.status === "annotated", patches.at(-1));
+
+  // ── Quick Review's Reject flags with needs_reannotation, not review
+  startQuickReview(null, "review"); await t.sleep(200);
+  document.querySelector("#qrReject").click(); await t.sleep(50);
+  t.check("Quick Review Reject sets needs_reannotation",
+    patches.at(-1)?.status === "needs_reannotation", patches.at(-1));
+});
+</script>

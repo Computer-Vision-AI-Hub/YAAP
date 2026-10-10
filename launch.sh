@@ -1,11 +1,11 @@
 #!/bin/bash
-# Starts YAAP using the already-built image (no rebuild) and opens it in the
+# Starts YAAP using the already-built image and opens it in the
 # default browser once it's actually responding.
 set -e
 cd "$(dirname "$0")"
 
 docker compose up -d
-rm -f data/.leave_at   # stale marker from a previous run shouldn't trigger an immediate shutdown
+rm -f data/.leave_at   
 
 echo "Waiting for YAAP..."
 until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8811/ 2>/dev/null | grep -q 200; do

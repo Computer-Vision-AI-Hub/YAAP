@@ -99,6 +99,8 @@ def predict(image_path: str, model_name: str, prompt: dict, device: str = "auto"
     """prompt: {type: 'point'|'box', points:[[x,y]..], labels:[1,0..], box:[x1,y1,x2,y2]}
     Returns [{polygon, bbox, score, label}] — polygons in pixel coords."""
     ptype = prompt.get("type")
+    if model_name not in SAM_MODELS:   # never load a client-chosen path (pickle)
+        raise SamError(f"Unknown SAM model '{model_name}'.")
     model = _load_sam(model_name)
     kwargs = {"device": _device(device), "verbose": False}
     if ptype == "point":

@@ -37,7 +37,7 @@ class Project(Base):
 class LabelClass(Base):
     __tablename__ = "label_classes"
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     name = Column(String, nullable=False)
     color = Column(String, default="#FFC53D")
     order_idx = Column(Integer, default=0)
@@ -48,11 +48,13 @@ class LabelClass(Base):
 class ImageAsset(Base):
     __tablename__ = "images"
     id = Column(Integer, primary_key=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     filename = Column(String, nullable=False)
     width = Column(Integer, default=0)
     height = Column(Integer, default=0)
-    status = Column(String, default="unannotated")  # unannotated | annotated | review
+    # unannotated | annotated | auto-annotated | review | needs_reannotation | empty | approved
+    # — meanings and transitions in DOCUMENTATION.md §6.3
+    status = Column(String, default="unannotated")
     split = Column(String, default="")              # optional manual split pin
     created_at = Column(DateTime, default=now)
 
@@ -63,7 +65,7 @@ class ImageAsset(Base):
 class Annotation(Base):
     __tablename__ = "annotations"
     id = Column(Integer, primary_key=True)
-    image_id = Column(Integer, ForeignKey("images.id"), nullable=False)
+    image_id = Column(Integer, ForeignKey("images.id"), nullable=False, index=True)
     class_id = Column(Integer, ForeignKey("label_classes.id"), nullable=False)
     kind = Column(String, nullable=False)   # bbox | polygon | classification
     data = Column(Text, default="{}")       # bbox: {x,y,w,h} px  polygon: {points:[[x,y],..]}
@@ -128,7 +130,7 @@ class AutolabelJob(Base):
     images_labeled = Column(Integer, default=0)
     annotations_added = Column(Integer, default=0)
     skipped = Column(Text, default="[]")            # JSON list of filenames
-    labeled_image_ids = Column(Text, default="[]")  # JSON list — images this job actually touched
+    labeled_image_ids = Column(Text, default="[]")  # JSON list — images this job touched
     log = Column(Text, default="")                  # newline-joined progress lines
     error = Column(Text, default="")
     created_at = Column(DateTime, default=now)
@@ -136,6 +138,12 @@ class AutolabelJob(Base):
 
 def init_db():
     Base.metadata.create_all(engine)
+    # create_all() only builds indexes for brand-new tables — add them to
+    # databases created before the index=True columns existed
+    with engine.begin() as conn:
+        for table in (LabelClass.__table__, ImageAsset.__table__, Annotation.__table__):
+            for idx in table.indexes:
+                idx.create(conn, checkfirst=True)
 
 
 def get_db():

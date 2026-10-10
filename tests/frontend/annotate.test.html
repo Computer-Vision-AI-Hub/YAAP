@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>annotate</title>
+<script src="harness.js"></script>
+<script>
+// The Annotate view: listener cleanup, autosave target, class picker, exit flow.
+test(async t => {
+  const PROJECT = { id: 1, name: "P", task_type: "detect", image_count: 3, annotated_count: 0,
+    classes: [{ id: 1, name: "cat", color: "#f00" }, { id: 2, name: "dog", color: "#0f0" }] };
+  // server order differs from the order a QC-scoped annotate list may use
+  const IMAGES = [3, 1, 2].map(id => ({ id, filename: `i${id}.png`, width: 100, height: 100,
+    status: "unannotated", annotation_count: 0, split: "" }));
+  const puts = [];
+  await t.boot({ routes: [
+    ["GET", /\/api\/projects$/, () => []],
+    ["GET", /\/api\/projects\/1$/, () => PROJECT],
+    ["GET", /\/images$/, () => IMAGES.map(x => ({ ...x }))],
+    ["GET", /\/images\/\d+\/annotations$/, () => []],
+    ["PUT", /\/images\/(\d+)\/annotations$/, url => { puts.push(+url.match(/images\/(\d+)\//)[1]); return { ok: true }; }],
+    ["PATCH", /\/images\/\d+$/, (url, body) => body],
+  ] });
+
+  const at = (ed, ix, iy) => {
+    const r = ed.cv.getBoundingClientRect(), [sx, sy] = ed.toScr(ix, iy);
+    return { clientX: r.left + sx, clientY: r.top + sy, button: 0 };
+  };
+  async function drawBox(ed) {
+    ed.setTool("bbox");
+    ed._down(at(ed, 10, 10)); ed._move(at(ed, 60, 60)); ed._up();
+    await t.sleep(20);
+  }
+  let keyCalls = 0;
+  const realKey = Editor.prototype._key;
+  Editor.prototype._key = function (e) { keyCalls++; return realKey.call(this, e); };
+  const press = key => window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+  // ── listeners don't pile up across visits, and are gone after leaving
+  for (const h of ["#/p/1/annotate", "#/p/1/classes", "#/p/1/annotate", "#/p/1/classes", "#/p/1/annotate"]) await t.go(h);
+  keyCalls = 0; press("v");
+  t.check("one editor key handler after three Annotate visits", keyCalls === 1, keyCalls);
+  await t.go("#/p/1/classes");
+  keyCalls = 0; press("v");
+  t.check("no editor key handler after leaving Annotate", keyCalls === 0, keyCalls);
+  t.check("S.editor cleared on leave", S.editor === null);
+
+  // ── arrow keys do nothing outside Annotate
+  puts.length = 0;
+  press("ArrowRight"); press("ArrowLeft"); await t.sleep(50);
+  t.check("arrow keys inert outside Annotate", window.onkeydown === null && !document.querySelector(".toast.err"));
+
+  // ── drawn box asks for its class, then becomes an annotation
+  await t.go("#/p/1/annotate");
+  const ed = S.editor;
+  await drawBox(ed);
+  t.check("drawn box waits for a class", ed.anns.length === 0 && ed.pendingShape?.kind === "bbox");
+  const chips = [...document.querySelectorAll("#samLabelPick .sam-label-chip")];
+  t.check("class picker shows every class", chips.map(c => c.textContent.trim()).join(",") === "cat,dog");
+  chips[1].click(); await t.sleep(20);
+  t.check("picked class lands on the annotation", ed.anns.length === 1 && ed.anns[0].class_id === 2);
+  t.check("picker hides after picking", document.querySelector("#samLabelPick").hidden);
+
+  // ── a pending autosave still writes to the image that was edited, even if
+  //    S.images/S.curImage change before the 700ms debounce fires
+  const editedId = S.images[S.curImage].id;
+  puts.length = 0;
+  await t.go("#/p/1/classes", 20);
+  S.images = IMAGES.map(x => ({ ...x })); S.curImage = 2;   // points at a different image now
+  await t.sleep(900);
+  t.check("pending autosave targets the edited image", puts.length === 1 && puts[0] === editedId, { puts, editedId });
+  t.check("late autosave raises no error toast", !document.querySelector(".toast.err"));
+
+  // ── Exit and running past the last image both land on the project Home view
+  await t.go("#/p/1/annotate");
+  document.querySelector("#edExit").click(); await t.sleep(100);
+  t.check("Exit lands on project Home", location.hash === "#/p/1/review", location.hash);
+  await t.go("#/p/1/annotate");
+  S.curImage = S.images.length - 1;
+  await route(); await t.sleep(150);
+  document.querySelector("#nextImg").click(); await t.sleep(100);
+  t.check("Next on the last image exits to project Home", location.hash === "#/p/1/review", location.hash);
+});
+</script>

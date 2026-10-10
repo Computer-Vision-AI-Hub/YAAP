@@ -1,14 +1,11 @@
 # YAAP — Architecture & Code Documentation
 
-YAAP (Yet Another Annotation Platform) is a local-first, self-hosted image annotation
-tool developed by ComputerVisionAIHub, and deliberately small: one FastAPI
-process, one SQLite file, static HTML/CSS/vanilla-JS frontend (no build step, no
-framework), and Ultralytics for every model-backed feature (auto-label, SAM-assisted
-segmentation, training). Everything — images, labels, model weights, training runs —
-lives under `./data` on the host, bind-mounted into the container. Nothing is sent
-anywhere over the network unless you explicitly download a pretrained weight.
+YAAP (Yet Another Annotation Platform) is a local, self-hosted image annotation
+tool developed by ComputerVisionAIHub ( one FastAPI
+process, one SQLite file, static HTML/CSS/vanilla-JS frontend, and Ultralytics for every model-backed feature). Everything — images, labels, model weights, training runs —
+are stored in `./data` on the host, bind-mounted into the container.
 
-This document explains how the pieces fit together: the backend's routers/services/db
+This document explains the backend's routers/services/db
 layers, the frontend's view-router and canvas editor, the Docker packaging, and the
 on-disk data layout, plus the end-to-end flows that tie them together (annotate → QC →
 generate → train, and SAM-assisted segmentation).
@@ -20,12 +17,12 @@ generate → train, and SAM-assisted segmentation).
 ```
 ┌─────────────────────────────┐        ┌──────────────────────────────────────┐
 │   Browser (vanilla JS)      │  HTTP  │           FastAPI (uvicorn)           │
-│                              │◄──────►│                                        │
+│                             │◄──────►│                                        │
 │  index.html                 │  JSON  │  app.py — mounts routers + /static     │
 │  ├─ api.js   (fetch client) │        │                                        │
 │  ├─ editor.js (canvas)      │        │  routers/  — one file per resource     │
 │  └─ app.js   (hash router,  │        │  services/ — business logic, no HTTP   │
-│      all views)              │        │  db.py     — SQLAlchemy models         │
+│      all views)             │        │  db.py     — SQLAlchemy models         │
 │  yaap.css (design tokens)   │        │  schemas.py — Pydantic I/O contracts   │
 └─────────────────────────────┘        └──────────────┬─────────────────────────┘
                                                         │
@@ -33,7 +30,7 @@ generate → train, and SAM-assisted segmentation).
                                           │     ./data  (bind mount)   │
                                           │  yaap.db          (SQLite) │
                                           │  projects/<id>/…   images  │
-                                          │  models/…      weight cache│
+                                          │  models/…         weights  │
                                           │  runs/…      training logs │
                                           └────────────────────────────┘
                                           ┌────────────────────────────┐
@@ -56,8 +53,8 @@ manual `ALTER TABLE`.
 ```
 YAAP/
 ├─ backend/
-│  ├─ app.py              FastAPI app: router registration + static mount + "/"
-│  ├─ config.py           All paths (DATA_DIR, PROJECTS_DIR, MODELS_DIR, SEG_MODELS_DIR…)
+│  ├─ app.py               FastAPI app: router registration + static mount + "/"
+│  ├─ config.py            All paths (DATA_DIR, PROJECTS_DIR, MODELS_DIR, SEG_MODELS_DIR)
 │  ├─ db.py                SQLAlchemy engine/session + all table models
 │  ├─ schemas.py           Pydantic request bodies (validation only, no ORM coupling)
 │  ├─ routers/             One FastAPI router per resource — thin HTTP glue
@@ -139,7 +136,7 @@ closing it after the request.
 |---|---|---|
 | `Project` | one dataset/task | `task_type`: `detect`\|`segment`\|`classify` — fixed at creation, drives every downstream tool choice |
 | `LabelClass` | a class within a project | `order_idx` (becomes the YOLO class index on export — **keep stable once training starts**), `color` |
-| `ImageAsset` | one uploaded image | `status`: `unannotated`\|`annotated`\|`review`\|`approved` (see §6.3); `split`: `""`\|`train`\|`val`\|`test` — a **manual pin** that `_split_images()` respects before randomizing the rest |
+| `ImageAsset` | one uploaded image | `status`: `unannotated`\|`annotated`\|`auto-annotated`\|`review`\|`needs_reannotation`\|`empty`\|`approved` (see §6.3); `split`: `""`\|`train`\|`val`\|`test` — a **manual pin** that `_split_images()` respects before randomizing the rest |
 | `Annotation` | one shape on one image | `kind`: `bbox`\|`polygon`\|`classification`; `data` is a JSON string (`{x,y,w,h}` for bbox, `{points:[[x,y]…]}` for polygon, `{}` for classification); `source`: `manual`\|`model`; `confidence` |
 | `DatasetVersion` | a frozen, generated snapshot | `config` (the full `VersionCreate` body, JSON), `stats` (output of `exporter.generate()`), `status`: `building`\|`ready`\|`failed` |
 | `ModelWeight` | an uploaded or trained `.pt` | `project_id` nullable = global weight available to all projects; `source`: `uploaded`\|`trained` |
@@ -184,8 +181,8 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   `AutolabelJob` row tracks `status`/`processed`/`total`/`log`, polled by the UI) rather
   than blocking the request — for each image it calls `inference.predict()`, optionally
   auto-creates missing classes (matched **by name**, same pattern reused in
-  `importer.py`), and marks touched images `status="annotated"` (not `"review"` — that
-  would skip human review entirely). `/autolabel/{jid}/preview` returns exactly the
+  `importer.py`), and marks touched images `status="auto-annotated"` (not `"review"` —
+  that would skip human review entirely). `/autolabel/{jid}/preview` returns exactly the
   images that job touched, with their new annotations, for the preview-grid the UI shows
   once the job finishes; approving there (per-image or in bulk) is what actually promotes
   an image to `status="review"`, via the ordinary `PATCH .../images/{iid}` endpoint.
@@ -369,15 +366,14 @@ Views, in rail order:
   projects with a matching `task_type`).
 - **`viewReview`** *(the QC screen)* — filter chips with live counts; each grid tile has
   an "open in editor," a quick-approve, and a quick-reject button (reject sets
-  `status="review"` — the same status the auto-label preview grid's "Approve" button
-  promotes freshly-labeled images to once a human has actually looked at them; click
-  again to clear it). Clicking the tile itself also opens the editor
+  `status="needs_reannotation"`; click again to clear it — see §6.3 for why this is
+  separate from auto-label's `review`). Clicking the tile itself also opens the editor
   (`openReviewImage` reassigns `S.images`/`S.curImage` and navigates to `annotate`, so
   Prev/Next inside the editor walks the same filtered ordering you were browsing). The
   default filter is a pseudo-status, `"reviewable"` (labeled "To review" in the UI) —
-  `qcMatch()` defines it as `status === "annotated" || status === "review"`, i.e.
-  *deliberately excluding* both `unannotated` (nothing to review yet) and `approved`
-  (already resolved). This is what makes the queue actually drain to empty as you
+  `qcMatch()` defines it as `annotated`, `auto-annotated`, `empty` or `review`, i.e.
+  *deliberately excluding* `unannotated` (nothing to review yet), `needs_reannotation`
+  (waiting on a fix) and `approved` (already resolved). This is what makes the queue actually drain to empty as you
   approve/reject your way through it, rather than staying permanently populated — an
   earlier version defined it as "anything not unannotated," which included `approved`
   and meant reviewed images never left the list.
@@ -392,7 +388,7 @@ Views, in rail order:
   `.logbox`, same styling as training job logs) until it's done, then calls
   `renderAlPreviewGrid()`: an `.al-grid` of cards — one per labeled image, each an SVG
   preview built with the same `annotationShapesSvg()` helper Quick Review uses — with a
-  per-card "Approve → Needs review" button (`PATCH status=review`) plus a header
+  per-card "Approve → To review" button (`PATCH status=review`) plus a header
   "Approve all" button that `confirm()`s before bulk-patching every not-yet-approved card
   in the batch. Nothing is auto-flagged for review anymore; the human decides per image
   or in one deliberate bulk action.
@@ -553,31 +549,39 @@ seg_models/             SAM .pt weights (sam3.pt — the only SAM backend now)
 
 ### 6.3 `ImageAsset.status` state machine
 
-- `unannotated` → default; set back to this if the annotation list becomes empty.
-- `annotated` → set whenever the editor saves a non-empty annotation list, an import/
-  merge brings one in with a classification tag, **or autolabel adds predictions to an
-  image** — autolabel deliberately does *not* jump straight to `review`; the freshly
-  labeled images sit here, neutral, until a human looks at them (see the auto-label
-  preview grid below).
-- `review` → set three ways, all meaning the same thing — "a human has flagged this and
-  it needs a pass through the QC queue": the manual **Reject** action (editor topstrip
-  button, or the Review grid's quick-reject), the auto-label preview grid's per-image
-  **Approve** button, and its **Approve all** bulk button. They share one status rather
-  than needing a separate "rejected"/"pending" split, so anything here lands in the same
-  "To review" queue regardless of which path put it there. Reject toggles: clicking it
-  again on an already-`review` image clears the flag back to `annotated`.
-- `approved` → set only by the explicit Approve action (editor topstrip button, or the
-  Review grid's quick-approve). **Editing an approved image's annotations silently drops
-  it back to `annotated`** (the save handler always recomputes status from the current
-  annotation count) — approval is a snapshot judgment, not a sticky flag, by design: it
-  forces re-approval after any change. Version generation defaults to filtering on this
-  status.
+Seven values. The backend stores whatever string `PATCH /images/{iid}` sends (no enum),
+so the frontend is what keeps these consistent.
 
-The Review view's default filter (§4.3, `viewReview`) reads this state machine as: **To
-review** = `annotated ∪ review` (still needs a decision), **All** = everything,
-**Approved**/**Needs review**/**Unannotated**/**Annotated** = exact single-status
-matches. Nothing new on the backend — `PATCH /images/{iid}` already accepted an
-arbitrary `status` string; reject is purely a frontend convention reusing it.
+- `unannotated` → default; set back to this whenever the annotation list becomes empty
+  (editor save, the Review grid's 🗑 erase, or clearing an `empty` flag).
+- `annotated` → set whenever an annotation save has at least one shape (editor
+  autosave, import/merge). **Every save recomputes status from the annotation count**,
+  so editing an `approved`, `review` or `needs_reannotation` image drops it back here.
+  This is deliberate: approval is a snapshot, and fixing a rejected image is what sends
+  it back to the queue.
+- `auto-annotated` → set by an auto-label job on every image it added predictions to.
+  Nothing a model produced counts as reviewed until a human looks at it in the
+  auto-label preview grid.
+- `review` → "graduated from auto-label into the main QC queue": set only by the
+  auto-label preview grid's per-image **Approve** and its **Approve all** button.
+- `needs_reannotation` → "a human rejected this, fix it": set by **Reject** (editor
+  topstrip, the Review grid's ✕, Quick Review's Reject / `R` key, and the approved-images
+  browser's "Revert"). Reject toggles: clicking it again clears the flag back to
+  `annotated`. It used to share the `review` string with auto-label approval, which made
+  rejected images show up under both "To review" and "Needs re-annotation" at once; it
+  is a separate value now so the two never overlap.
+- `empty` → "checked, there are no objects here": set by the editor's **∅ Mark empty**,
+  which also clears the image's annotations. Counts as labeled in the project's
+  `annotated_count`.
+- `approved` → set only by an explicit Approve (editor topstrip, the Review grid's ✓,
+  Quick Review's Accept / `A` key). Version generation defaults to `approved_only`.
+
+The Review view's filter chips (`QC_FILTERS` / `qcMatch()` in `app.js`, §4.3) read this
+as: **To review** = `annotated ∪ auto-annotated ∪ empty ∪ review` (still needs a
+decision — a pseudo-filter, not a status), **Needs re-annotation** =
+`needs_reannotation`, and **Unannotated** / **Auto-annotated** / **Approved** = exact
+matches. `needs_reannotation` is deliberately *not* in "To review": a rejected image
+stays out of the queue until someone fixes and saves it.
 
 ### 6.4 Class matching convention
 

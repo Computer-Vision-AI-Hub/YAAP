@@ -38,6 +38,12 @@ window.addEventListener("DOMContentLoaded", () => {
     nav(b.dataset.view);
   });
   $("#homeBtn").onclick = () => { location.hash = "#/"; };
+  $("#viewerClose").onclick = closeViewer;
+  // click on the dark area around the content closes it, like most lightboxes
+  $("#viewer").onclick = e => { if (e.target.id === "viewer" || e.target.id === "viewerBody") closeViewer(); };
+  // Esc closes natively; "close" fires asynchronously, so skip the wipe if
+  // another viewer has opened in the meantime
+  $("#viewer").addEventListener("close", () => { if (!$("#viewer").open) $("#viewerBody").innerHTML = ""; });
   loadDevice();
   route();
   fetch("/api/system/here", { method: "POST" }).catch(() => {});
@@ -62,6 +68,10 @@ async function loadDevice() {
 async function route() {
   clearInterval(S.jobPoll); clearInterval(S.verPoll);
   S.onLeaveAnnotate = null;   // stale hook would otherwise fire against a view that's no longer live
+  if ($("#viewer")?.open) closeViewer();
+  // a pending autosave still runs — destroy() only drops the editor's listeners
+  S.editor?.destroy(); S.editor = null;
+  window.onkeydown = null;   // Annotate's ←/→ image navigation
   const m = location.hash.match(/^#\/p\/(\d+)\/(\w+)/);
   if (!m) { S.project = null; $("#rail").hidden = true; $("#topbarMid").innerHTML = ""; return viewHome(); }
   const [, pid, view] = m;
@@ -77,7 +87,8 @@ async function route() {
     <span class="chip mono">${S.project.image_count} imgs · ${S.project.annotated_count} labeled</span>`;
   ({ upload: viewUpload, annotate: viewAnnotate, review: viewReview, quickreview: viewQuickReview,
      classes: viewClasses, autolabel: viewAutolabel,
-     generate: viewGenerate, versions: viewVersions, train: viewTrain }[view] || viewReview)();
+     generate: viewGenerate, versions: viewVersions, train: viewTrain,
+     testmodel: viewTestModel }[view] || viewReview)();
 }
 
 /* ── home: projects ───────────────────────────────────────────────── */
@@ -143,6 +154,37 @@ function showNewProject() {
 
 function openModal(html) { $("#modalBody").innerHTML = html; $("#modal").showModal(); }
 function closeModal() { $("#modal").close(); }
+
+/* full-screen viewer: one <dialog> reused for images, annotated cards and logs */
+function openViewer(title, html, { hint = "", bodyClass = "" } = {}) {
+  $("#viewerTitle").textContent = title;
+  $("#viewerHint").textContent = hint;
+  const body = $("#viewerBody");
+  body.className = `viewer-body ${bodyClass}`;
+  body.innerHTML = html;
+  $("#viewer").showModal();
+}
+function closeViewer() {
+  if ($("#viewer").open) $("#viewer").close();
+  $("#viewerBody").innerHTML = "";
+}
+function openImageViewer(title, src) {
+  openViewer(title, `<img class="viewer-img" src="${src}" alt="${esc(title)}">`,
+    { hint: "click the image to toggle actual size" });
+  const img = $("#viewerBody .viewer-img");
+  img.onclick = () => { img.classList.toggle("actual"); $("#viewerBody").classList.toggle("scroll"); };
+}
+// click any .al-frame inside `host` → that image with its overlay, full screen,
+// carrying over the grid's hide-boxes / hide-labels state
+function enableFrameViewer(host) {
+  host.addEventListener("click", e => {
+    const frame = e.target.closest(".al-frame");
+    if (!frame || !host.contains(frame)) return;
+    const name = frame.closest(".al-card")?.querySelector(".al-meta span")?.textContent || "";
+    const toggles = ["hide-boxes", "hide-labels"].filter(c => host.classList.contains(c)).join(" ");
+    openViewer(name, `<div class="viewer-frame">${frame.innerHTML}</div>`, { bodyClass: toggles });
+  });
+}
 
 /* ── upload / dataset browser ─────────────────────────────────────── */
 async function viewUpload() {
@@ -244,16 +286,13 @@ async function viewUpload() {
 }
 
 /* ── review / quality control ────────────────────────────────────── */
-// "reviewable" is a pseudo-filter (not a real status): images that still need
-// a QC decision — freshly annotated (by hand or by a model), or rejected and
-// waiting on a re-review after being fixed. Unannotated (nothing to review
-// yet) and approved (already resolved) are both excluded, so this queue
-// actually drains to empty as you work through it instead of staying
-// populated forever. There's no direct "Annotated" filter — every annotated
-// image (manual or auto) already surfaces under "To review".
+// "review" = graduated from auto-label into the main QC queue; "needs_reannotation"
+// = rejected by a human, a distinct status so it never overlaps with "To review".
+// Fixing + saving a rejected image flips it back to "annotated" (annotations.py),
+// so it reappears under "To review" on its own.
 const QC_FILTERS = [
   ["unannotated", "Unannotated"], ["reviewable", "To review"],
-  ["auto-annotated", "Auto-annotated"], ["review", "Needs re-annotation"],
+  ["auto-annotated", "Auto-annotated"], ["needs_reannotation", "Needs re-annotation"],
   ["approved", "Approved"],
 ];
 const qcMatch = (im, filter) => filter === "reviewable"
@@ -300,8 +339,8 @@ async function viewReview() {
         <span class="st ${im.status}"></span>
         <div class="qc-actions">
           <button class="btn small" data-open="${im.id}" title="Open in editor">✎</button>
-          <button class="btn small ${im.status === "review" ? "danger" : ""}" data-reject="${im.id}"
-            title="${im.status === "review" ? "Flagged for re-annotation — clear flag" : "Reject — flag for re-annotation"}">✕</button>
+          <button class="btn small ${im.status === "needs_reannotation" ? "danger" : ""}" data-reject="${im.id}"
+            title="${im.status === "needs_reannotation" ? "Flagged for re-annotation — clear flag" : "Reject — flag for re-annotation"}">✕</button>
           <button class="btn small ${im.status === "approved" ? "primary" : ""}" data-approve="${im.id}"
             title="${im.status === "approved" ? "Un-approve" : "Approve"}">✓</button>
           <button class="btn small" data-clear="${im.id}" ${im.annotation_count ? "" : "disabled"}
@@ -331,7 +370,7 @@ async function viewReview() {
     });
     $$("[data-reject]", host).forEach(b => b.onclick = async () => {
       const im = images.find(x => x.id === +b.dataset.reject);
-      const next = im.status === "review" ? "annotated" : "review";
+      const next = im.status === "needs_reannotation" ? "annotated" : "needs_reannotation";
       try { im.status = (await API.patchImage(p.id, im.id, { status: next })).status; render(); }
       catch (e) { err(e); }
     });
@@ -356,8 +395,8 @@ function annotationShapesSvg(anns, classes, imgWidth) {
   const fontSize = Math.min(42, Math.max(14, Math.round(imgWidth / 40)));
   return anns.map(a => {
     const c = classes.find(x => x.id === a.class_id);
-    const color = c ? c.color : "#999";
-    const name = (c ? c.name : "?") + (a.source === "model" ? ` ·${Math.round(a.confidence * 100)}%` : "");
+    const color = c ? c.color : (a.color || "#999");
+    const name = (c ? c.name : (a.class_name || "?")) + (a.source === "model" ? ` ·${Math.round(a.confidence * 100)}%` : "");
     let shape, lx, ly;
     if (a.kind === "bbox") {
       const d = a.data;
@@ -374,7 +413,7 @@ function annotationShapesSvg(anns, classes, imgWidth) {
     const label = `<rect x="${lx}" y="${labelY - fontSize - 4}" width="${labelW}" height="${fontSize + 6}" fill="${color}"/>
       <text x="${lx + 4}" y="${labelY - 5}" font-size="${fontSize}" font-family="monospace"
         font-weight="600" fill="#0a0a0a">${esc(name)}</text>`;
-    return shape + label;
+    return `<g class="ann-box">${shape}</g><g class="ann-label">${label}</g>`;
   }).join("");
 }
 
@@ -482,7 +521,7 @@ async function viewQuickReview() {
 
     if (mode === "review") {
       $("#qrAccept").onclick = () => decide("approved");
-      $("#qrReject").onclick = () => decide("review");
+      $("#qrReject").onclick = () => decide("needs_reannotation");
     } else {
       $("#qrPrev").onclick = () => { if (idx > 0) { idx--; renderCurrent(); } };
       $("#qrNext").onclick = () => { if (idx < queue.length - 1) { idx++; renderCurrent(); } };
@@ -504,7 +543,7 @@ async function viewQuickReview() {
 
   async function revert() {
     const im = queue[idx];
-    try { await API.patchImage(p.id, im.id, { status: "review" }); } catch (e) { return err(e); }
+    try { await API.patchImage(p.id, im.id, { status: "needs_reannotation" }); } catch (e) { return err(e); }
     toast(`"${im.filename}" sent back to Needs re-annotation.`, "ok");
     queue.splice(idx, 1);
     if (!queue.length) {
@@ -650,6 +689,7 @@ async function viewAnnotate() {
     </aside>
   </div>`;
 
+  S.editor?.destroy();
   const editor = S.editor = new Editor($("#edCanvas"), {
     classes: () => S.project.classes,
     getActiveClass: () => S.project.classes.find(c => c.id === S.activeClassId),
@@ -782,6 +822,9 @@ async function viewAnnotate() {
   };
 
   let dirty = false;
+  // the image the editor is showing — save() writes here, not to whatever
+  // S.images[S.curImage] points at by the time the debounced save fires
+  let editingImage = null;
   function markDirty() {
     dirty = true;
     const st = $("#saveState"); st.textContent = "unsaved"; st.className = "savestate dirty";
@@ -791,32 +834,28 @@ async function viewAnnotate() {
   }
   async function save() {
     if (!dirty) return;
-    const im = S.images[S.curImage];
+    const im = editingImage;
     try {
       await API.saveAnnotations(p.id, im.id, editor.anns.map(a =>
         ({ class_id: a.class_id, kind: a.kind, data: a.data, source: a.source, confidence: a.confidence })));
       dirty = false;
-      const st = $("#saveState"); st.textContent = "saved"; st.className = "savestate saved";
+      const st = $("#saveState");   // gone if the save finished after leaving the view
+      if (st) { st.textContent = "saved"; st.className = "savestate saved"; }
       im.annotation_count = editor.anns.length;
       im.status = editor.anns.length ? "annotated" : "unannotated";
     } catch (e) { err(e); }
   }
 
   // Shared by the Exit button, the Home/brand nav, and running past the last
-  // image with Next: save whatever's pending, and if the current image is
-  // now fully annotated (but not already reviewed/approved/empty), offer to
-  // push it to review before leaving. Same behavior everywhere it's called.
+  // image with Next: save whatever's pending, then land on the project's Home
+  // dashboard. No status change needed here — save() above already leaves a
+  // finished image as "annotated", which is exactly the status that puts it
+  // in "To review" (qcMatch). Setting it to "review" here would be wrong: that
+  // status means "flagged for re-annotation" (the Reject button), so doing it
+  // on a normal exit used to mislabel perfectly fine images as rejected.
   async function leaveAnnotator() {
     await save();
-    const im = S.images[S.curImage];
-    if (im && im.status === "annotated" &&
-        confirm(`"${im.filename}" is fully annotated. Push it to review before leaving?`)) {
-      try {
-        await API.patchImage(p.id, im.id, { status: "review" });
-        im.status = "review";
-      } catch (e) { err(e); }
-    }
-    nav("review");   // land on the project's Home dashboard, not the global projects list
+    nav("review");   // the project's Home dashboard, not the global projects list
   }
   S.onLeaveAnnotate = leaveAnnotator;
   $("#edExit").onclick = leaveAnnotator;
@@ -830,7 +869,7 @@ async function viewAnnotate() {
   }
 
   async function loadImage() {
-    const im = S.images[S.curImage];
+    const im = editingImage = S.images[S.curImage];
     $("#edFn").textContent = im.filename;
     $("#imgPos").textContent = `${S.curImage + 1}/${S.images.length}`;
     const warnEl = $("#edAnnotatedWarn");
@@ -864,17 +903,17 @@ async function viewAnnotate() {
   function renderReject() {
     const im = S.images[S.curImage];
     const btn = $("#edReject"); if (!btn) return;
-    btn.textContent = im.status === "review" ? "✕ Rejected" : "✕ Reject";
-    btn.classList.toggle("danger", im.status === "review");
+    btn.textContent = im.status === "needs_reannotation" ? "✕ Rejected" : "✕ Reject";
+    btn.classList.toggle("danger", im.status === "needs_reannotation");
   }
   $("#edReject") && ($("#edReject").onclick = async () => {
     const im = S.images[S.curImage];
     try {
-      const next = im.status === "review" ? "annotated" : "review";
+      const next = im.status === "needs_reannotation" ? "annotated" : "needs_reannotation";
       await API.patchImage(p.id, im.id, { status: next });
       im.status = next;
       renderApprove(); renderReject(); renderMarkEmpty();
-      toast(im.status === "review" ? "Flagged for review." : "Rejection cleared.", "ok");
+      toast(im.status === "needs_reannotation" ? "Flagged for re-annotation." : "Rejection cleared.", "ok");
     } catch (e) { err(e); }
   });
 
@@ -1043,6 +1082,7 @@ async function viewAutolabel() {
     try { await API.uploadWeight(f, p.task_type, p.id); toast("Weights uploaded.", "ok"); viewAutolabel(); }
     catch (e) { err(e); }
   };
+  enableFrameViewer($("#alPreview"));
 }
 
 function renderAlProgress(job) {
@@ -1089,7 +1129,7 @@ async function renderAlPreviewGrid(p, jid) {
       </div>
       <div class="row" style="padding:0 10px 10px">
         <button class="btn small ${approved ? "primary" : ""}" data-approve="${im.id}" ${approved ? "disabled" : ""}>
-          ${approved ? "✓ Approved" : "✓ Approve → Needs review"}</button>
+          ${approved ? "✓ Approved" : "✓ Approve → To review"}</button>
         <a class="btn small ghost" href="#/p/${p.id}/annotate" data-open="${im.id}">Open</a>
       </div>
     </div>`;
@@ -1098,7 +1138,7 @@ async function renderAlPreviewGrid(p, jid) {
   $("#alPreview").innerHTML = `
     <div class="row" style="align-items:center;justify-content:space-between;margin-top:20px">
       <h3 class="sect" style="margin:0">Review auto-labeled images (${data.images.length})</h3>
-      <button class="btn primary small" id="alApproveAll">✓ Approve all → Needs review</button>
+      <button class="btn primary small" id="alApproveAll">✓ Approve all → To review</button>
     </div>
     <div class="al-grid">${data.images.map(card).join("")}</div>`;
 
@@ -1109,7 +1149,7 @@ async function renderAlPreviewGrid(p, jid) {
     if (im) im.status = "review";
     btn.closest(".al-card").classList.add("approved");
     btn.textContent = "✓ Approved"; btn.classList.add("primary"); btn.disabled = true;
-    toast("Approved — sent to Needs review.", "ok");
+    toast("Approved — moved to the To review queue.", "ok");
   });
 
   $$("[data-open]", $("#alPreview")).forEach(a => a.onclick = () => { S.pendingImageId = +a.dataset.open; });
@@ -1117,7 +1157,7 @@ async function renderAlPreviewGrid(p, jid) {
   $("#alApproveAll").onclick = async () => {
     const pending = data.images.filter(im => im.status !== "review");
     if (!pending.length) return toast("Everything here is already approved.", "");
-    if (!confirm(`Approve all ${pending.length} remaining auto-labeled image(s)? They'll move to Needs review.`)) return;
+    if (!confirm(`Approve all ${pending.length} remaining auto-labeled image(s)? They'll move to the To review queue.`)) return;
     try { await Promise.all(pending.map(im => API.patchImage(p.id, im.id, { status: "review" }))); }
     catch (e) { return err(e); }
     pending.forEach(im => { im.status = "review"; });
@@ -1494,16 +1534,16 @@ async function viewTrain() {
       <div id="jobList"></div>
       <div class="joblog-head" id="jobLogHead">
         <span class="mono" style="font-size:11px;color:var(--muted)" id="jobLogTitle"></span>
-        <button class="btn small" id="jobLogExpand">⤢ Expand</button>
+        <button class="btn small" id="jobLogFull">⛶ Full screen</button>
       </div>
       <div class="logbox" id="jobLog" style="display:none"></div>
       <div class="row job-plots" id="jobPlots" style="display:none">
         <div style="flex:1;min-width:260px">
-          <p class="sub" style="margin:12px 0 4px">Results</p>
+          <p class="sub" style="margin:12px 0 4px">Results <span class="plot-hint">· click to open full screen</span></p>
           <img id="jobPlotResults" alt="results.png" style="display:none">
         </div>
         <div style="flex:1;min-width:260px">
-          <p class="sub" style="margin:12px 0 4px">Confusion matrix</p>
+          <p class="sub" style="margin:12px 0 4px">Confusion matrix <span class="plot-hint">· click to open full screen</span></p>
           <img id="jobPlotConfusion" alt="confusion_matrix.png" style="display:none">
         </div>
       </div>
@@ -1612,7 +1652,7 @@ results = model.train(
     } catch (e) { err(e); }
   };
 
-  let watching = null, expanded = false;
+  let watching = null, plotsKey = null;
   async function renderJobs() {
     let jobs = [];
     try { jobs = await API.jobs(p.id); } catch (e) { return; }
@@ -1639,29 +1679,46 @@ results = model.train(
           $("#jobLog").style.display = "none";
           $("#jobLogHead").classList.remove("show");
           $("#jobPlots").style.display = "none";
+          plotsKey = null;
+          closeViewer();
         }
         renderJobs();
       } catch (e) { err(e); }
     });
   }
+  // only follow the tail if the user hasn't scrolled away from the bottom —
+  // otherwise every 3.5s refresh yanks them back down mid-read
+  function writeLog(box, text) {
+    const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.textContent = text;
+    if (wasAtBottom) box.scrollTop = box.scrollHeight;
+    return wasAtBottom;
+  }
   async function pollLog() {
     if (!watching) return;
+    const full = $("#viewerLog");
     try {
-      const r = await API.jobLog(p.id, watching, expanded ? 2000 : 200);
+      const r = await API.jobLog(p.id, watching, full ? 5000 : 200);
+      const text = r.log || "(no output yet)";
       const box = $("#jobLog");
-      // only follow the tail if the user hasn't scrolled away from the bottom —
-      // otherwise every 3.5s refresh yanks them back down mid-read
-      const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
       box.style.display = "block";
       $("#jobLogHead").classList.add("show");
+      const following = writeLog(box, text);
       $("#jobLogTitle").textContent = `job #${watching} · ${r.status}` +
-        (wasAtBottom ? "" : " · scrolled up — jump to bottom to resume auto-follow");
-      box.textContent = r.log || "(no output yet)";
-      if (wasAtBottom) box.scrollTop = box.scrollHeight;
-      showPlots(watching);
+        (following ? "" : " · scrolled up — jump to bottom to resume auto-follow");
+      if (full) {
+        writeLog(full, text);
+        $("#viewerTitle").textContent = `Training log · job #${watching} · ${r.status}`;
+      }
+      showPlots(watching, r.status);
     } catch (_) {}
   }
-  function showPlots(jid) {
+  function showPlots(jid, status) {
+    // a finished job's plots never change — load them once instead of
+    // re-fetching (and flickering) on every poll
+    const key = `${jid}:${status}`;
+    if (key === plotsKey && status !== "running") return;
+    plotsKey = key;
     const r = $("#jobPlotResults"), c = $("#jobPlotConfusion");
     $("#jobPlots").style.display = "flex";
     r.onload = () => { r.style.display = "block"; };
@@ -1674,12 +1731,136 @@ results = model.train(
     r.src = API.jobPlotUrl(p.id, jid, "results") + `?t=${t}`;
     c.src = API.jobPlotUrl(p.id, jid, "confusion_matrix") + `?t=${t}`;
   }
-  $("#jobLogExpand").onclick = () => {
-    expanded = !expanded;
-    $("#jobLog").classList.toggle("expanded", expanded);
-    $("#jobLogExpand").textContent = expanded ? "⤡ Collapse" : "⤢ Expand";
+  $("#jobLogFull").onclick = () => {
+    openViewer(`Training log · job #${watching}`, `<pre class="logbox viewer-log" id="viewerLog"></pre>`,
+      { hint: "updates live while the job runs" });
     pollLog();
   };
+  $("#jobPlotResults").onclick = () => openImageViewer(`job #${watching} · results.png`, $("#jobPlotResults").src);
+  $("#jobPlotConfusion").onclick = () => openImageViewer(`job #${watching} · confusion_matrix.png`, $("#jobPlotConfusion").src);
   await renderJobs();
   S.jobPoll = setInterval(() => { renderJobs(); pollLog(); }, 3500);
+}
+
+/* ── test model: run inference over a version's test-split images ──── */
+async function viewTestModel() {
+  const p = S.project;
+  let versions = [], models;
+  try { [versions, models] = await Promise.all([API.versions(p.id), API.models(p.id, p.task_type)]); }
+  catch (e) { return err(e); }
+  const ready = versions.filter(v => v.status === "ready");
+  const verOpts = ready.map(v => `<option value="${v.id}">${esc(v.name)}</option>`).join("")
+    || `<option value="">No versions yet — use Generate</option>`;
+  const modelOpts = [
+    ...models.weights.map(w => `<option value="weight:${w.id}">★ ${esc(w.name)} (${w.source})</option>`),
+    ...models.pretrained.map(m => `<option value="${m}">${m}</option>`),
+    ...(models.rtdetr || []).map(m => `<option value="${m}">${m} (RT-DETR)</option>`),
+    ...(models.rfdetr_available ? models.rfdetr : []).map(m => `<option value="${m}">${m} (RF-DETR)</option>`),
+  ].join("");
+
+  $("#stage").innerHTML = `<div class="stage-pad" style="max-width:980px">
+    <h1 class="page">Test model</h1>
+    <p class="sub">Pick a dataset version and a model — its own trained job, an uploaded
+      weights file, or a pretrained alias — and run it over that version's test-split
+      images to eyeball how it's doing. Nothing here is saved; it's pure visualization.</p>
+    <div class="card">
+      <div class="grid2">
+        <div><label class="fld">Dataset version (uses its test split)</label>
+          <select class="input" id="tmVer">${verOpts}</select></div>
+        <div><label class="fld">Model</label>
+          <select class="input" id="tmModel">${modelOpts}</select></div>
+        <div><label class="fld">Confidence threshold</label>
+          <input class="input" id="tmConf" type="number" min="0.05" max="0.95" step="0.05" value="0.4"></div>
+        <div><label class="fld">IoU threshold</label>
+          <input class="input" id="tmIou" type="number" min="0.05" max="0.95" step="0.05" value="0.5"></div>
+        <div><label class="fld">Images to test</label>
+          <input class="input" id="tmLimit" type="number" min="1" max="100" value="20"></div>
+      </div>
+      <div class="row" style="margin-top:16px">
+        <button class="btn primary" id="tmGo" ${ready.length ? "" : "disabled"}>▶ Run test</button>
+        ${ready.length ? "" : `<span class="chip warn">Generate a dataset version first</span>`}
+        <span class="chip mono" id="tmStatus"></span>
+      </div>
+    </div>
+    <h3 class="sect">Bring your own weights</h3>
+    <div class="card row">
+      <input type="file" id="wtFile" accept=".pt" class="input" style="flex:1">
+      <button class="btn" id="wtGo">Upload .pt</button>
+    </div>
+
+    <div class="row" id="tmToggles" style="margin-top:20px;display:none">
+      <label class="fld" style="margin:0"><input type="checkbox" id="tmShowBoxes" checked> Show boxes</label>
+      <label class="fld" style="margin:0"><input type="checkbox" id="tmShowLabels" checked> Show labels</label>
+    </div>
+    <div class="al-grid" id="tmPreview" style="margin-top:12px"></div>
+    <div class="row" style="justify-content:center;margin-top:14px">
+      <button class="btn" id="tmLoadMore" hidden>Load more</button>
+    </div>
+
+    <div class="tm-powered">
+      <img src="/static/img/cvaih-logo.png" alt="ComputerVisionAIHub">
+      <span>Powered by ComputerVisionAIHub</span>
+    </div>
+  </div>`;
+
+  $("#wtGo").onclick = async () => {
+    const f = $("#wtFile").files[0];
+    if (!f) return;
+    try { await API.uploadWeight(f, p.task_type, p.id); toast("Weights uploaded.", "ok"); viewTestModel(); }
+    catch (e) { err(e); }
+  };
+
+  $("#tmShowBoxes").onchange = () => $("#tmPreview").classList.toggle("hide-boxes", !$("#tmShowBoxes").checked);
+  $("#tmShowLabels").onchange = () => $("#tmPreview").classList.toggle("hide-labels", !$("#tmShowLabels").checked);
+  enableFrameViewer($("#tmPreview"));
+
+  let total = 0, shownSoFar = 0;
+  function card(im) {
+    const shapes = annotationShapesSvg(im.predictions, p.classes, im.width);
+    return `<div class="al-card" data-id="${im.id}">
+      <div class="al-frame"><svg viewBox="0 0 ${im.width} ${im.height}" preserveAspectRatio="xMidYMid meet">
+        <image href="${API.imageUrl(p.id, im.id)}" width="${im.width}" height="${im.height}"></image>
+        ${shapes}
+      </svg></div>
+      <div class="al-meta">
+        <span class="mono" title="${esc(im.filename)}">${esc(im.filename)}</span>
+        <span class="mono">${im.predictions.length} pred.</span>
+      </div>
+    </div>`;
+  }
+
+  async function runPage(offset) {
+    const body = {
+      version_id: +$("#tmVer").value, model_name: $("#tmModel").value,
+      conf: +$("#tmConf").value, iou: +$("#tmIou").value,
+      limit: +$("#tmLimit").value, offset,
+    };
+    const r = await API.testModel(p.id, body);
+    total = r.test_split_total;
+    shownSoFar = offset + r.shown;
+    const host = $("#tmPreview");
+    if (offset === 0) host.innerHTML = "";
+    host.insertAdjacentHTML("beforeend", r.images.map(card).join(""));
+    $("#tmToggles").style.display = r.images.length ? "flex" : "none";
+    $("#tmLoadMore").hidden = shownSoFar >= total;
+    if (!r.images.length && offset === 0) {
+      host.innerHTML = `<div class="empty" style="grid-column:1/-1">
+        ${r.skipped.length ? "Every image in this batch failed to run — check the model/weights." : "Nothing to show."}</div>`;
+    }
+    if (r.skipped.length) toast(`${r.skipped.length} image(s) skipped (missing file or inference error).`, "");
+  }
+
+  $("#tmGo").onclick = async () => {
+    if (!$("#tmVer").value) return toast("Generate a dataset version first.", "err");
+    const btn = $("#tmGo"); btn.disabled = true;
+    $("#tmStatus").textContent = "running…";
+    try { await runPage(0); }
+    catch (e) { err(e); }
+    $("#tmStatus").textContent = ""; btn.disabled = false;
+  };
+  $("#tmLoadMore").onclick = async () => {
+    const btn = $("#tmLoadMore"); btn.disabled = true;
+    try { await runPage(shownSoFar); } catch (e) { err(e); }
+    btn.disabled = false;
+  };
 }

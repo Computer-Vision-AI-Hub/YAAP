@@ -247,7 +247,8 @@ input[type=color]{width:26px;height:26px;border:none;background:none;padding:0;c
 #augPreview{width:100%;border-radius:8px;border:1px solid var(--line);margin-top:12px;display:none}
 
 .job-plots{flex-wrap:wrap}
-.job-plots img{width:100%;border-radius:8px;border:1px solid var(--line);background:#0a0e14;display:none}
+.job-plots img{width:100%;border-radius:8px;border:1px solid var(--line);background:#0a0e14;display:none;cursor:zoom-in}
+.plot-hint{color:var(--faint);font-size:11px}
 
 /* ultralytics train() hyperparameter / augmentation overrides */
 details.hp-details{margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);
@@ -279,7 +280,6 @@ details.hp-details .hp-body{padding:4px 16px 16px}
 .logbox{background:#090b0e;border:1px solid var(--line);border-radius:8px;padding:12px;
   font-family:var(--font-mono);font-size:11px;color:#9fb0c3;white-space:pre-wrap;max-height:320px;
   overflow:auto;margin-top:10px;transition:max-height .15s}
-.logbox.expanded{max-height:70vh}
 .joblog-head{display:none;align-items:center;justify-content:space-between;margin-top:10px}
 .joblog-head.show{display:flex}
 
@@ -298,6 +298,14 @@ details.hp-details .hp-body{padding:4px 16px 16px}
 .al-card .al-meta{padding:8px 10px;font-size:11px;color:var(--muted);display:flex;justify-content:space-between;gap:6px;overflow:hidden}
 .al-card .al-meta span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* test model — box/label visibility toggle, scoped to its own grid so
+   annotationShapesSvg's other caller (Quick Review) is unaffected */
+.hide-boxes .ann-box{display:none}
+.hide-labels .ann-label{display:none}
+.al-card .al-frame{cursor:zoom-in}
+.tm-powered{display:flex;align-items:center;gap:8px;margin-top:22px;color:var(--muted);font-size:12px}
+.tm-powered img{width:20px;height:20px;border-radius:5px}
+
 /* toast + modal */
 .toast-host{position:fixed;bottom:18px;right:18px;display:flex;flex-direction:column;gap:8px;z-index:100}
 .toast{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--amber);
@@ -308,6 +316,22 @@ details.hp-details .hp-body{padding:4px 16px 16px}
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;
   padding:22px;max-width:520px;width:92vw}
 dialog::backdrop{background:rgba(5,7,9,.7)}
+
+/* full-screen viewer (images, annotated cards, training log) */
+dialog.viewer{width:100vw;height:100vh;max-width:none;max-height:none;margin:0;padding:0;
+  border:0;border-radius:0;background:rgba(5,7,9,.96);display:flex;flex-direction:column}
+dialog.viewer:not([open]){display:none}
+.viewer-bar{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line);
+  background:var(--panel);flex:0 0 auto}
+.viewer-bar #viewerTitle{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.viewer-hint{font-size:11px;color:var(--faint);flex:1}
+.viewer-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:16px;overflow:hidden}
+.viewer-body.scroll{display:block;overflow:auto}
+.viewer-img{max-width:100%;max-height:100%;object-fit:contain;cursor:zoom-in;background:#fff;border-radius:4px}
+.viewer-img.actual{max-width:none;max-height:none;cursor:zoom-out}
+.viewer-frame{width:100%;height:100%}
+.viewer-frame svg{width:100%;height:100%;display:block}
+.viewer-log{width:100%;height:100%;max-height:none;margin:0;font-size:12.5px;line-height:1.55}
 
 .empty{color:var(--faint);text-align:center;padding:40px;border:1px dashed var(--line);
   border-radius:var(--radius);font-size:13px}

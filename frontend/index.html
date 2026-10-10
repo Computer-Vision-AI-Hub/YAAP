@@ -40,12 +40,21 @@
     <button class="rail-btn" data-view="generate" title="Generate dataset version"><span class="rb-ico">⚙</span>Generate</button>
     <button class="rail-btn" data-view="versions" title="Versions & export"><span class="rb-ico">⬇</span>Versions</button>
     <button class="rail-btn" data-view="train"    title="Train with ultralytics"><span class="rb-ico">▶</span>Train</button>
+    <button class="rail-btn" data-view="testmodel" title="Test a model on this version's test images"><span class="rb-ico">🧪</span>Test model</button>
   </nav>
   <main class="stage" id="stage"><!-- views render here --></main>
 </div>
 
 <div class="toast-host" id="toastHost"></div>
 <dialog id="modal"><div id="modalBody"></div></dialog>
+<dialog id="viewer" class="viewer">
+  <div class="viewer-bar">
+    <span class="mono" id="viewerTitle"></span>
+    <span class="viewer-hint" id="viewerHint"></span>
+    <button class="btn small" id="viewerClose">✕ Close <span class="kbd">Esc</span></button>
+  </div>
+  <div class="viewer-body" id="viewerBody"></div>
+</dialog>
 
 <script src="/static/js/api.js"></script>
 <script src="/static/js/editor.js"></script>

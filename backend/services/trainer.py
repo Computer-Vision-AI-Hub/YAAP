@@ -37,12 +37,13 @@ def start(db, project: Project, version: DatasetVersion, req) -> TrainJob:
     log_path = RUNS_DIR / f"job_{job.id}.log"
     job.log_path = str(log_path)
 
-    log_file = open(log_path, "w")
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "backend.services.train_worker", "--job", str(job.id)],
-        cwd=str(BASE_DIR), stdout=log_file, stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    # the child inherits its own copy of the descriptor, so ours can close now
+    with open(log_path, "w") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "backend.services.train_worker", "--job", str(job.id)],
+            cwd=str(BASE_DIR), stdout=log_file, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     job.pid = proc.pid
     job.status = "running"
     db.commit()

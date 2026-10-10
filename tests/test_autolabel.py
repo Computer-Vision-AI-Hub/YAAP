@@ -1,5 +1,5 @@
 """Auto-label as a background job: progress tracking, and the new
-preview/approve gate — predictions must land as status="annotated", never
+preview/approve gate — predictions must land as status="auto-annotated", never
 "review" directly; only an explicit approval (per-image or bulk, both just
 the ordinary PATCH the frontend calls) promotes an image to "review".
 
@@ -90,6 +90,20 @@ def test_autolabel_with_no_images_returns_400(client):
     pid = client.post("/api/projects", json={"name": "P"}).json()["id"]
     r = client.post(f"/api/projects/{pid}/autolabel", json={"model_name": "yolo11n.pt"})
     assert r.status_code == 400
+
+
+def test_autolabel_ignores_image_ids_from_another_project(client, monkeypatch):
+    from backend.routers import models as models_router
+    monkeypatch.setattr(models_router.inference, "predict", _fake_predict)
+
+    pid_a, iid_a = _project_with_image(client)
+    pid_b, _ = _project_with_image(client)
+
+    r = client.post(f"/api/projects/{pid_b}/autolabel",
+                    json={"model_name": "yolo11n.pt", "image_ids": [iid_a]})
+    assert r.status_code == 400
+    assert client.get(f"/api/projects/{pid_a}/images/{iid_a}/annotations").json() == []
+    assert client.get(f"/api/projects/{pid_a}/images").json()[0]["status"] == "unannotated"
 
 
 def test_inference_error_is_logged_not_fatal(client, monkeypatch):

@@ -5,26 +5,21 @@
 A fully **local, open-source** computer-vision annotation platform: upload
 datasets, segment objects interactively with **SAM 3** (point or box
 prompts), refine labels by hand, auto-label at scale with YOLOv8 / YOLO11 /
-YOLO26, RT-DETR (and optionally RF-DETR), augment, version, and export as
+YOLO26, RT-DETR, augment, version, and export as
 either **YOLO** (ultralytics-ready) or **COCO** JSON — then train models on
 your own GPU. Nothing ever leaves your machine.
 
-```
-Upload → SAM-assisted annotation → Auto-label → Generate version → Export / Train → better models → …
-```
 
 ## Why local?
 
-YAAP is built for teams (medical imaging, industrial inspection, research…)
+YAAP is built for small teams/ individual annotators (medical imaging, industrial inspection, research…)
 that cannot send data to third-party services:
 
 - **No accounts, no telemetry, no cloud.** Storage is a SQLite DB + plain
-  folders under `data/`. Delete the folder, and the data is gone.
-- **The web UI binds to `127.0.0.1` by default** — not reachable from the network.
+  folders under `data/` - Delete the folder, and the data is gone.
+- **The web UI binds to `127.0.0.1` by default** — local host - not reachable from the network.
 - The only optional outbound traffic is ultralytics downloading model weights
-  (e.g. `sam3.pt`, `yolo26n.pt`) the first time you use them. For **air-gapped
-  operation**, place or upload the `.pt` files manually and nothing is ever
-  downloaded.
+  (e.g. `sam3.pt`, `yolo26n.pt`) the first time you use them. 
 
 ## SAM-assisted annotation
 
@@ -36,9 +31,9 @@ The `✦` tool in the editor is the heart of YAAP, backed by **SAM 3** only
 | **Point** | Click on the object (shift-click adds a *negative* point to carve away background). Every extra click refines the mask. |
 | **Box** | Drag a rough rectangle around the object. |
 
-The predicted mask appears as a dashed teal preview. Refine it with more
-clicks, then either pick a class from the small chip row that pops up right
-next to the mask (labels + accepts in one click), or hit **Accept (↵)** to use
+The predicted mask appears as a dashed preview. Refine it with more
+clicks, then either pick a class that pops up right
+next to the mask, or hit **Accept (↵)** to use
 whichever class is active in the sidebar — YAAP converts it to the format your
 project actually trains on:
 
@@ -46,19 +41,19 @@ project actually trains on:
 - **Segmentation project** → a simplified polygon (editable vertex-by-vertex).
 
 So one interaction model produces correctly-formatted labels for both
-architectures. Rejected masks (`Esc`) leave no trace.
+architectures. 
 
 ## Features
 
 | Area | What you get |
 |---|---|
 | Tasks | Object detection (boxes), instance segmentation (polygons), classification |
-| Editor | Canvas with pan/zoom, SAM assist, box + polygon tools, vertex editing, class hotkeys `1-9`, autosave, crosshair guides |
+| Editor | Canvas with SAM assist, box + polygon tools, vertex editing, class hotkeys `1-9`, autosave, crosshair guides |
 | SAM | SAM 3 point / box prompts, mask→polygon simplification, task-aware conversion, per-mask class picker |
-| Auto-label | Batch inference with any ultralytics model — YOLOv8 / YOLO11 / YOLO26, `-seg`, `-cls`, RT-DETR, your uploaded or YAAP-trained `.pt`; optional RF-DETR. Predictions land as editable annotations flagged *for review* |
+| Auto-label | Batch inference with any ultralytics model — YOLOv8 / YOLO11 / YOLO26, `-seg`, `-cls`, RT-DETR, your uploaded or YAAP-trained `.pt`. Predictions land as editable annotations flagged *for review* |
 | Augmentation | albumentations pipeline: flips, rotate, shear, brightness/contrast, hue/sat, blur, noise, CLAHE, cutout, grayscale — with live preview, applied to the train split only |
 | Versions | Frozen dataset snapshots: split ratios, preprocessing (resize / stretch / letterbox / grayscale), augmentation multiplier, choice of export format, zip download |
-| Export | **YOLO** — detect txt, YOLO-seg polygon txt, or classification folders, with `data.yaml`, directly consumable by `yolo train` / the ultralytics Python API. **COCO** — `_annotations.coco.json` per split (Roboflow-style layout), for RF-DETR / HuggingFace `transformers` / detectron2 / pycocotools. Detect and segment projects can pick either; classify is YOLO-folder only |
+| Export | **YOLO** — detect txt, YOLO-seg polygon txt, or classification folders, with `data.yaml`, directly consumable by `yolo train` / the ultralytics Python API. **COCO** — `_annotations.coco.json` per split (Roboflow-style layout) / HuggingFace `transformers` / detectron2 / pycocotools. Detect and segment projects can pick either; classify is YOLO-folder only |
 | Training | Launch ultralytics training jobs from the UI (subprocess, live log, stop button) for YOLO or RT-DETR. Best weights feed back into auto-labeling. A separate Google Colab tab gives a copyable notebook template for training elsewhere |
 | GPU | PyTorch with CUDA — device is auto-detected and shown in the top bar; SAM, auto-label and training all use it |
 
@@ -73,8 +68,9 @@ docker compose up --build
 # CPU fallback (no GPU on this machine)
 docker compose --profile cpu up --build yaap-cpu
 ```
-
-Open **http://127.0.0.1:8811**. All state persists in `./data` on the host.
+Then choose:
+1) Docker compose creates Desktop shortcut for starting the YAAP Docker container. 
+2) Open **http://127.0.0.1:8811**. All state persists in `./data` on the host.
 
 On first start the container pre-downloads the weights listed in the
 `PRELOAD_MODELS` env (default: `sam3.pt yolo11n.pt`) into
@@ -96,7 +92,7 @@ it once. Two ways to get it — pick whichever you'd rather depend on:
 
 ```bash
 # Docker Hub only, no GitHub involved — the script ships inside the image
-docker run --rm lukasiktar/yaap:cpu cat /opt/yaap-portable-launch.sh > yaap-portable-launch.sh
+docker run --rm computervisionaihub/yaap:cpu cat /opt/yaap-portable-launch.sh > yaap-portable-launch.sh
 
 # or via GitHub Pages
 curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
@@ -106,12 +102,8 @@ curl -O https://computer-vision-ai-hub.github.io/YAAP/yaap-portable-launch.sh
 bash yaap-portable-launch.sh
 ```
 
-(The Docker Hub extraction deliberately uses the `:cpu` tag even if you'll
-run GPU YAAP — it's ~2GB instead of ~10GB, just to fetch a 4KB script, and
-its plain Python base has no wrapping entrypoint. The GPU image's NVIDIA
-base injects a CUDA license banner into anything you run through it, which
-would otherwise corrupt the extracted file — the launcher itself decides
-GPU vs CPU separately once it actually runs.)
+Docker compose creates Desktop shortcut for starting the YAAP Docker container. 
+
 
 On first run it auto-detects GPU vs CPU (`nvidia-smi` present or not), writes
 a `docker-compose.yml` + data folders under `~/YAAP`, installs a YAAP desktop
@@ -173,6 +165,7 @@ Training outside YAAP works too, since every version is standard ultralytics:
 ```bash
 yolo detect train data=data/projects/1/versions/v3/data.yaml model=yolo26s.pt epochs=200 imgsz=640 device=0
 ```
+OR:
 
 ```python
 from ultralytics import YOLO
@@ -195,7 +188,7 @@ YAAP/
 │  └─ services/
 │     ├─ storage.py           # uploads, thumbnails, project folders
 │     ├─ sam.py               # SAM 3 point/box prompting, mask → polygon
-│     ├─ inference.py         # ultralytics (YOLO/RT-DETR) + RF-DETR batch auto-label (lazy imports, GPU auto)
+│     ├─ inference.py         # ultralytics (YOLO/RT-DETR) + RF-DETR batch auto-label 
 │     ├─ augmenter.py         # albumentations; polygons via keypoints
 │     ├─ exporter.py          # version generation, YOLO or COCO det/seg/cls export, zip
 │     ├─ importer.py          # zip → project import, project → project merge
@@ -204,6 +197,8 @@ YAAP/
 ├─ frontend/                  # zero-build vanilla JS
 │  ├─ index.html  css/yaap.css
 │  └─ js/api.js  js/editor.js  js/app.js
+├─ tests/                     # backend: pytest
+│  └─ frontend/               # UI: *.test.html run in headless Chrome
 └─ data/                      # created at runtime — ALL of your data lives here
    ├─ yaap.db                 # SQLite
    ├─ projects/<id>/{images,thumbs,versions}
@@ -211,25 +206,26 @@ YAAP/
    └─ runs/                   # ultralytics training runs + logs
 ```
 
-## API
-
-Interactive OpenAPI docs at **http://127.0.0.1:8811/docs** — everything the UI
-does is a plain REST call (including SAM prompting at
-`POST /api/projects/{pid}/images/{iid}/sam`), so you can script bulk imports,
-programmatic SAM labeling, or CI exports.
-
 ## Testing
 
+**Backend** — pytest, against a throwaway data dir (your real `data/` is never touched).
+`inference.predict()` is mocked, so no model weights are needed:
+
 ```bash
-docker compose exec yaap pytest -v      # or: pytest, if running the bare-Python setup
+docker compose exec yaap pytest -q
 ```
 
-A `pytest` suite in `tests/` covers project/class/image/annotation CRUD and
-dataset version generation (both YOLO and COCO layouts) against a throwaway
-SQLite DB and data dir (`YAAP_DATA_DIR`, set automatically by
-`tests/conftest.py`) — it never touches your real `data/`. It doesn't cover
-anything that needs torch/ultralytics actually loaded (SAM, auto-label,
-training) — those are exercised manually.
+**Frontend** — each `tests/frontend/*.test.html` loads the real `frontend/index.html`
+and scripts with a mocked API, drives the UI, and reports its checks. Runs on the
+host (needs Chrome or Chromium; set `CHROME=/path/to/chrome` if it isn't on `PATH`):
+
+```bash
+python3 tests/frontend/run.py            # all
+python3 tests/frontend/run.py annotate   # files whose name contains "annotate"
+```
+
+To add a test, copy an existing `.test.html`: `t.boot({ routes })` mocks the API,
+`t.go("#/p/1/<view>")` navigates, `t.check(name, condition)` records a result.
 
 ## Notes & limits
 
@@ -251,10 +247,12 @@ training) — those are exercised manually.
 
 ## License
 
-MIT © ComputerVisionAIHub — do whatever helps you ship datasets.
+MIT © ComputerVisionAIHub.
 
-YAAP's own code is MIT. Its ML backbone (`ultralytics`, powering YOLO,
-RT-DETR, and SAM) is **AGPL-3.0**, and Meta's SAM weights carry their own
+YAAP's own code is MIT. 
+Its ML backbone (`ultralytics`, powering YOLO,
+RT-DETR, and SAM) is **AGPL-3.0**, 
+and Meta's SAM weights carry their own
 separate license — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-before using this commercially. See [CONTRIBUTING.md](CONTRIBUTING.md) if
-you'd like to submit a fix or feature.
+before using this commercially. 
+See [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to submit a fix or feature.

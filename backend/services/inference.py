@@ -6,7 +6,9 @@ from __future__ import annotations
 import functools
 from pathlib import Path
 
-from ..config import MODELS_DIR
+from ..config import MODELS_DIR, PRETRAINED_MODELS, RFDETR_VARIANTS, RTDETR_VARIANTS
+
+KNOWN_ALIASES = frozenset([m for ms in PRETRAINED_MODELS.values() for m in ms] + RTDETR_VARIANTS)
 
 
 class InferenceError(RuntimeError):
@@ -64,7 +66,10 @@ def is_rtdetr_arch(model_name: str, db=None) -> bool:
     """Returns True if the model is an RT-DETR architecture (vs YOLO)."""
     if model_name.startswith("weight:") and db is not None:
         from ..db import ModelWeight
-        wid = int(model_name.split(":", 1)[1])
+        try:
+            wid = int(model_name.split(":", 1)[1])
+        except ValueError:
+            return False   # resolve_weights() reports the bad reference
         w = db.get(ModelWeight, wid)
         return bool(w and "rtdetr" in (w.arch or "").lower())
     return "rtdetr" in model_name.lower()
@@ -86,14 +91,20 @@ def _load_rfdetr(variant: str):
 
 
 def resolve_weights(model_name: str, db=None) -> str:
-    """'weight:<id>' → stored path, otherwise treat as ultralytics alias/path."""
+    """'weight:<id>' → stored path, or a known pretrained alias. Anything else is
+    refused: .pt files are pickles, so loading a client-chosen path runs code."""
     if model_name.startswith("weight:") and db is not None:
         from ..db import ModelWeight
-        wid = int(model_name.split(":", 1)[1])
+        try:
+            wid = int(model_name.split(":", 1)[1])
+        except ValueError:
+            raise InferenceError(f"Invalid weight reference '{model_name}'.")
         w = db.get(ModelWeight, wid)
         if not w or not Path(w.path).exists():
             raise InferenceError(f"Stored weight #{wid} not found on disk.")
         return w.path
+    if model_name not in KNOWN_ALIASES:
+        raise InferenceError(f"Unknown model '{model_name}' — pick a listed model or upload weights.")
     # keep ultralytics' auto-download inside our data dir
     import os
     os.environ.setdefault("YOLO_CONFIG_DIR", str(MODELS_DIR))
@@ -106,7 +117,7 @@ def predict(model_name: str, image_path: str, task: str, conf: float, iou: float
     """Returns [{class_name, kind, data, confidence}, ...] in pixel coordinates."""
     device = resolve_device(device)
 
-    if model_name.startswith("rfdetr"):
+    if model_name in RFDETR_VARIANTS:
         return _predict_rfdetr(model_name, image_path, conf)
 
     loader = _load_rtdetr if is_rtdetr_arch(model_name, db) else _load_yolo

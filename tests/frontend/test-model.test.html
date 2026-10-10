@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>test-model</title>
+<script src="harness.js"></script>
+<script>
+// Test model view: pickers, the predictions grid, show/hide toggles, paging,
+// full-screen cards and the ComputerVisionAIHub credit.
+test(async t => {
+  const PROJECT = { id: 1, name: "P", task_type: "detect", image_count: 25, annotated_count: 25,
+    classes: [{ id: 1, name: "cat", color: "#f00" }] };
+  const TOTAL = 25;
+  const requests = [];
+  await t.boot({ routes: [
+    ["GET", /\/api\/projects$/, () => []],
+    ["GET", /\/api\/projects\/1$/, () => PROJECT],
+    ["GET", /\/versions$/, () => [{ id: 1, name: "v1", status: "ready" }, { id: 2, name: "v2", status: "building" }]],
+    ["GET", /\/api\/models/, () => ({ weights: [{ id: 4, name: "my-job", source: "trained" }],
+      pretrained: ["yolo11n.pt"], rtdetr: [], rfdetr_available: false, rfdetr: [] })],
+    ["POST", /\/test-model$/, (url, b) => {
+      requests.push(b);
+      const page = Array.from({ length: TOTAL }, (_, i) => ({ id: i + 1, filename: `img${i}.png`, width: 100, height: 100,
+        predictions: [{ class_id: 1, class_name: "cat", kind: "bbox", source: "model", confidence: 0.9,
+          color: "#f00", data: { x: 5, y: 5, w: 10, h: 10 } }] })).slice(b.offset, b.offset + b.limit);
+      return { test_split_total: TOTAL, shown: page.length, offset: b.offset, limit: b.limit, skipped: [], images: page };
+    }],
+  ] });
+  await t.go("#/p/1/testmodel");
+
+  const verOpts = [...document.querySelectorAll("#tmVer option")].map(o => o.value);
+  t.check("only ready versions are offered", verOpts.join() === "1", verOpts);
+  t.check("trained/uploaded weights are offered", document.querySelector("#tmModel").innerHTML.includes("my-job"));
+  t.check("bring-your-own-weights upload is present", !!document.querySelector("#wtFile"));
+  t.check("Powered by ComputerVisionAIHub credit", document.querySelector(".tm-powered")?.textContent.includes("Powered by ComputerVisionAIHub"));
+  t.check("credit shows the CVAIH logo", document.querySelector(".tm-powered img")?.getAttribute("src") === "/static/img/cvaih-logo.png");
+
+  document.querySelector("#tmGo").click(); await t.sleep(100);
+  t.check("sends version, model and limit 20", requests[0]?.version_id === 1 && requests[0]?.limit === 20 && requests[0]?.offset === 0, requests[0]);
+  t.check("renders 20 cards", document.querySelectorAll("#tmPreview .al-card").length === 20);
+  t.check("Load more shown while images remain", !document.querySelector("#tmLoadMore").hidden);
+
+  const shown = sel => getComputedStyle(document.querySelector(sel)).display !== "none";
+  const boxes = document.querySelector("#tmShowBoxes"), labels = document.querySelector("#tmShowLabels");
+  boxes.checked = false; boxes.dispatchEvent(new Event("change"));
+  t.check("unticking Show boxes hides boxes", !shown("#tmPreview .ann-box"));
+  t.check("labels stay visible on their own", shown("#tmPreview .ann-label"));
+  labels.checked = false; labels.dispatchEvent(new Event("change"));
+  t.check("unticking Show labels hides labels", !shown("#tmPreview .ann-label"));
+  boxes.checked = true; boxes.dispatchEvent(new Event("change"));
+  t.check("re-ticking Show boxes brings boxes back", shown("#tmPreview .ann-box"));
+
+  // full-screen card keeps the grid's toggle state (labels hidden, boxes shown)
+  document.querySelector("#tmPreview .al-frame").click(); await t.sleep(30);
+  t.check("card opens full screen", document.querySelector("#viewer").open && !!document.querySelector("#viewerBody svg"));
+  t.check("full-screen title is the filename", document.querySelector("#viewerTitle").textContent === "img0.png");
+  t.check("full-screen card keeps labels hidden", !shown("#viewerBody .ann-label"));
+  t.check("full-screen card keeps boxes shown", shown("#viewerBody .ann-box"));
+  document.querySelector("#viewerClose").click(); await t.sleep(30);
+
+  document.querySelector("#tmLoadMore").click(); await t.sleep(100);
+  t.check("Load more asks for the next page", requests[1]?.offset === 20, requests[1]);
+  t.check("Load more appends the rest", document.querySelectorAll("#tmPreview .al-card").length === TOTAL);
+  t.check("Load more hides at the end", document.querySelector("#tmLoadMore").hidden);
+});
+</script>
