@@ -164,8 +164,20 @@ EOF
 chmod +x "$WATCHER.tmp"
 mv -f "$WATCHER.tmp" "$WATCHER"
 
-# Desktop shortcut
+# Desktop shortcut — YAAP logo from the website, generic icon if offline.
 DESKTOP_FILE="$HOME/.local/share/applications/yaap.desktop"
+LOGO="$YAAP_HOME/yaap-logo.png"
+if [ ! -s "$LOGO" ]; then
+  curl -fsSL -m 20 https://computer-vision-ai-hub.github.io/YAAP/img/yaap-logo.png -o "$LOGO" 2>/dev/null || rm -f "$LOGO"
+fi
+ICON="applications-graphics"
+[ -s "$LOGO" ] && ICON="$LOGO"
+# Shortcuts made by older versions of this script get the logo too.
+for f in "$DESKTOP_FILE" "$HOME/Desktop/yaap.desktop"; do
+  if [ -f "$f" ] && [ "$ICON" != "applications-graphics" ]; then
+    sed -i "s|^Icon=applications-graphics$|Icon=$ICON|" "$f"
+  fi
+done
 if [ ! -f "$DESKTOP_FILE" ]; then
   mkdir -p "$HOME/.local/share/applications"
   cat > "$DESKTOP_FILE" << EOF
@@ -174,7 +186,7 @@ Type=Application
 Name=YAAP
 Comment=Yet Another Annotation Platform
 Exec=bash -lc "$SELF"
-Icon=applications-graphics
+Icon=$ICON
 Terminal=false
 Categories=Development;Graphics;
 EOF
