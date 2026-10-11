@@ -1,11 +1,8 @@
 #!/bin/bash
-# YAAP portable launcher — works on any Linux device with Docker installed,
-# no repo checkout needed. Pulls the published computervisionaihub/yaap image,
-# keeps data under ~/YAAP, auto-detects GPU vs CPU, and installs its own
+# YAAP portable launcher.
+# Pulls the published computervisionaihub/yaap image, auto-detects GPU vs CPU, and installs its own
 # desktop shortcut the first time it runs.
 #
-# Setup: copy just this one file anywhere and run it once
-# (`bash yaap-portable-launch.sh`) — everything else is generated.
 #
 # Overrides (optional):
 #   YAAP_MODE=cpu  bash yaap-launch.sh   # force CPU even if a GPU exists
@@ -13,8 +10,6 @@
 #   YAAP_IDLE_SHUTDOWN=0 bash yaap-launch.sh   # never auto-stop when the tab closes
 set -e
 
-# Bump this whenever the generated compose template changes, so existing
-# installs get regenerated (the old file is kept as a .bak).
 TEMPLATE_VERSION=3
 
 YAAP_HOME="$HOME/YAAP"
@@ -29,14 +24,12 @@ URL="http://127.0.0.1:8811"
 # the usual locations of docker / nvidia-smi are on PATH.
 export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
 
-# Model weights go in data/models — the container expects that folder to exist.
+# Model weights go in data/models.
 mkdir -p "$YAAP_HOME/data/models" "$YAAP_HOME/seg_models"
-# The container runs as its own unprivileged user whose uid may not match
-# yours, so let it write into the mounted folders.
+# To let container write into the mounted folders.
 chmod -R a+rwX "$YAAP_HOME/data" "$YAAP_HOME/seg_models" 2>/dev/null || true
 
-# Log everything (a silent failure is debuggable with no visible terminal)
-# while still printing normally when run interactively.
+# Logs.
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "── $(date) ──"
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "YAAP" "$1" 2>/dev/null || true; }
@@ -50,17 +43,14 @@ fi
 
 notify "Starting… first run can take a few minutes (downloading the image)."
 
-# Copy myself into a stable location so the desktop shortcut always has a
-# fixed target, regardless of where this file was first downloaded to.
+# Copy this launcher into YAAP_HOME so the desktop shortcut can always find it, and
+# make it executable.
 if [ "$(readlink -f "$0")" != "$(readlink -f "$SELF" 2>/dev/null || echo "")" ]; then
   cp "$0" "$SELF"
   chmod +x "$SELF"
 fi
 
-# ── GPU detection ──────────────────────────────────────────────────────────
-# A GPU is only usable if (1) the host NVIDIA driver works and (2) Docker has
-# the NVIDIA runtime (NVIDIA Container Toolkit). Checking nvidia-smi alone
-# isn't enough. The image is CUDA-only, so AMD/Intel GPUs use CPU mode.
+# GPU detection 
 detect_mode() {
   if [ "$YAAP_MODE" = "cpu" ] || [ "$YAAP_MODE" = "gpu" ]; then
     echo "$YAAP_MODE"; return
@@ -131,9 +121,7 @@ EOF
 MODE=$(detect_mode)
 echo "[yaap] detected mode: $MODE"
 
-# Regenerate the compose file when it's missing, when GPU availability changed
-# (e.g. drivers installed later), or when this launcher's template changed.
-# Manual edits are kept otherwise; a replaced file is backed up first.
+# Compose regereraion if the template version changed.
 WANT_STAMP="$MODE v$TEMPLATE_VERSION"
 HAVE_STAMP=$(cat "$STAMP_FILE" 2>/dev/null || echo "")
 if [ ! -f "$COMPOSE_FILE" ] || [ "$HAVE_STAMP" != "$WANT_STAMP" ]; then
@@ -141,12 +129,7 @@ if [ ! -f "$COMPOSE_FILE" ] || [ "$HAVE_STAMP" != "$WANT_STAMP" ]; then
   write_compose "$MODE"
 fi
 
-# ── Idle-shutdown watcher (relies on the backend's /api/system/leaving,here) ──
-# Rewritten on every launch so fixes reach existing installs. Written to a temp
-# file and moved into place, so an already-running copy isn't corrupted.
-# The browser can send "leaving" while the page is still open (reloads,
-# navigation), so the watcher only shuts down if the backend has seen NO other
-# requests since the marker was written. Set YAAP_IDLE_SHUTDOWN=0 to disable.
+# ── Idle-shutdown watcher 
 cat > "$WATCHER.tmp" << 'EOF'
 #!/bin/bash
 export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
@@ -181,7 +164,7 @@ EOF
 chmod +x "$WATCHER.tmp"
 mv -f "$WATCHER.tmp" "$WATCHER"
 
-# ── Desktop shortcut (installed once) ────────────────────────────────────────
+# Desktop shortcut
 DESKTOP_FILE="$HOME/.local/share/applications/yaap.desktop"
 if [ ! -f "$DESKTOP_FILE" ]; then
   mkdir -p "$HOME/.local/share/applications"
@@ -204,7 +187,7 @@ EOF
   echo "[yaap] installed desktop shortcut — find YAAP in your app launcher from now on"
 fi
 
-# ── Start ────────────────────────────────────────────────────────────────────
+# Start
 cd "$YAAP_HOME"
 # Compose recreates the container automatically if the file changed.
 if ! docker compose up -d; then
@@ -221,7 +204,7 @@ if ! docker compose up -d; then
 fi
 rm -f data/.leave_at
 
-# Confirm the GPU really made it into the container (log only).
+# GPU detection log.
 if [ "$MODE" = "gpu" ]; then
   if docker exec yaap nvidia-smi -L 2>/dev/null; then
     echo "[yaap] GPU visible inside the container."
@@ -230,8 +213,7 @@ if [ "$MODE" = "gpu" ]; then
   fi
 fi
 
-# First start can take a while (model preload), so wait up to 10 minutes,
-# and stop waiting if the container dies.
+# First startup.
 echo "Waiting for YAAP..."
 for _ in $(seq 1 600); do
   if curl -s -o /dev/null -w "%{http_code}" "$URL/" 2>/dev/null | grep -q 200; then
@@ -245,7 +227,7 @@ for _ in $(seq 1 600); do
   sleep 1
 done
 
-# Replace any old watcher (it may be running outdated code), then start the
+# Replace any old watcher, then start the
 # current one unless idle shutdown is disabled.
 OLD_PID=$(cat "$YAAP_HOME/.watcher.pid" 2>/dev/null || echo "")
 [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null || true
