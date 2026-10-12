@@ -49,3 +49,13 @@ def test_leaving_allowed_once_job_finishes(client):
     r = client.post("/api/system/leaving")
     assert r.json() == {"ok": True}
     assert LEAVE_MARKER.exists()
+
+
+def test_ui_files_are_revalidated_after_updates(client):
+    """No stale JS after an upgrade — browsers must revalidate UI files."""
+    for url in ("/", "/static/js/editor.js"):
+        r = client.get(url)
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-cache"
+    etag = client.get("/static/js/editor.js").headers["etag"]
+    assert client.get("/static/js/editor.js", headers={"If-None-Match": etag}).status_code == 304

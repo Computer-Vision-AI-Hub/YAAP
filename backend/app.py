@@ -19,9 +19,18 @@ for r in (projects.router, images.router, annotations.router,
           models.router, datasets.router, training.router, sam.router):
     app.include_router(r)
 
-app.mount("/static", StaticFiles(directory=FRONTEND), name="static")
+class NoCacheStatic(StaticFiles):
+    """Browsers must revalidate the UI files on every load (a cheap 304 when
+    unchanged) — otherwise after an update they can keep running stale JS."""
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", NoCacheStatic(directory=FRONTEND), name="static")
 
 
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(FRONTEND / "index.html")
+    return FileResponse(FRONTEND / "index.html", headers={"Cache-Control": "no-cache"})

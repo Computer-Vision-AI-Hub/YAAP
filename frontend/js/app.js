@@ -349,8 +349,13 @@ async function viewReview() {
         <span class="nm">${esc(im.filename)} · ${im.annotation_count} ann.</span>
       </div>`).join("");
 
+    // already-annotated sections open the image in Quick Review; the ✎ button
+    // is the explicit way into the editor from there
     $$(".qc-tile", host).forEach(t => t.onclick = e => {
-      if (!e.target.closest("button")) openReviewImage(+t.dataset.id);
+      if (e.target.closest("button")) return;
+      if (S.qcFilter === "reviewable") startQuickReview(+t.dataset.id, "review");
+      else if (S.qcFilter === "approved") startQuickReview(+t.dataset.id, "approved");
+      else openReviewImage(+t.dataset.id);
     });
     $$("[data-open]", host).forEach(b => b.onclick = () => openReviewImage(+b.dataset.open));
     $$("[data-approve]", host).forEach(b => b.onclick = async () => {
@@ -648,7 +653,7 @@ async function viewAnnotate() {
       ${isCls ? "" : `
       <div class="ed-toolbar">
         <button class="tool-btn" data-tool="select" title="Select / edit (V)">➤</button>
-        <button class="tool-btn active" data-tool="bbox" title="Bounding box (B)" ${p.task_type === "segment" ? "" : ""}>▭</button>
+        <button class="tool-btn active" data-tool="bbox" title="Bounding box (B)">▭</button>
         <button class="tool-btn" data-tool="polygon" title="Polygon (P)" ${p.task_type === "detect" ? "style='display:none'" : ""}>⬠</button>
         <button class="tool-btn sam" data-tool="sam" title="SAM assist — click / shift-click / drag box (S)">✦</button>
         <button class="tool-btn" data-tool="pan" title="Pan (H, or hold Space)">✥</button>
@@ -702,8 +707,9 @@ async function viewAnnotate() {
     onSamState: updateSamStrip,
     onPendingShape: renderLabelPick,
   });
-  if (p.task_type === "segment") editor.setTool("polygon");
-  if (isCls) editor.setTool("pan");
+  // through the local setTool so the toolbar highlight matches the tool
+  if (p.task_type === "segment") setTool("polygon");
+  if (isCls) setTool("pan");
 
   $$(".tool-btn").forEach(b => b.onclick = () => setTool(b.dataset.tool));
   function setTool(t) {

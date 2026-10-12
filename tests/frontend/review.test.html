@@ -59,5 +59,22 @@ test(async t => {
   document.querySelector("#qrReject").click(); await t.sleep(50);
   t.check("Quick Review Reject sets needs_reannotation",
     patches.at(-1)?.status === "needs_reannotation", patches.at(-1));
+
+  // ── clicking an image under "To review" / "Approved" opens Quick Review at
+  //    that image, not the editor (those images are already annotated)
+  const qrShows = name => document.querySelector("#stage .sub")?.textContent.includes(name);
+  S.qcFilter = "reviewable";
+  await t.go("#/p/1/review");
+  document.querySelector('.qc-tile[data-id="3"] img').click(); await t.sleep(200);
+  t.check("To review tile opens Quick Review", location.hash.endsWith("/quickreview"), location.hash);
+  t.check("…at the clicked image", qrShows("c.png"), document.querySelector("#stage .sub")?.textContent);
+  S.qcFilter = "approved";
+  await t.go("#/p/1/review");
+  document.querySelector('.qc-tile[data-id="4"] img').click(); await t.sleep(200);
+  t.check("Approved tile opens Quick Review", location.hash.endsWith("/quickreview"), location.hash);
+  S.qcFilter = "needs_reannotation";
+  await t.go("#/p/1/review");
+  document.querySelector(".qc-tile img").click(); await t.sleep(200);
+  t.check("Needs re-annotation tile still opens the editor", location.hash.endsWith("/annotate"), location.hash);
 });
 </script>

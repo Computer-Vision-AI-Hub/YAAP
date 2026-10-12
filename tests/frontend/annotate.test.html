@@ -48,6 +48,17 @@ test(async t => {
   press("ArrowRight"); press("ArrowLeft"); await t.sleep(50);
   t.check("arrow keys inert outside Annotate", window.onkeydown === null && !document.querySelector(".toast.err"));
 
+  // ── toolbar highlight matches the starting tool (segment starts on polygon)
+  const active = () => [...document.querySelectorAll(".tool-btn.active")].map(b => b.dataset.tool).join(",");
+  await t.go("#/p/1/annotate");
+  t.check("detect starts on bbox, bbox highlighted", S.editor.tool === "bbox" && active() === "bbox", active());
+  PROJECT.task_type = "segment";
+  await t.go("#/p/1/classes"); await t.go("#/p/1/annotate");
+  t.check("segment starts on polygon, polygon highlighted", S.editor.tool === "polygon" && active() === "polygon",
+    { tool: S.editor.tool, active: active() });
+  PROJECT.task_type = "detect";
+  await t.go("#/p/1/classes");
+
   // ── drawn box asks for its class, then becomes an annotation
   await t.go("#/p/1/annotate");
   const ed = S.editor;
