@@ -124,7 +124,7 @@ DESKTOP_DIR=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
 if [ -d "$DESKTOP_DIR" ]; then
   cp "$APPS/yaap.desktop" "$DESKTOP_DIR/yaap.desktop"
   chmod +x "$DESKTOP_DIR/yaap.desktop"
-  command -v gio >/dev/null 2>&1 && gio set "$DESKTOP_DIR/yaap.desktop" metadata::trusted yes 2>/dev/null || true
+  command -v gio >/dev/null 2>&1 && gio set "$DESKTOP_DIR/yaap.desktop" metadata::trusted true 2>/dev/null || true
 fi
 echo "[yaap] installed the YAAP icon (desktop + app menu)"
 

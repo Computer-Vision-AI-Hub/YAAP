@@ -53,11 +53,18 @@ test(async t => {
   const ed = S.editor;
   await drawBox(ed);
   t.check("drawn box waits for a class", ed.anns.length === 0 && ed.pendingShape?.kind === "bbox");
+  let pendingDraws = 0;
+  const realPending = ed._drawPendingShape;
+  ed._drawPendingShape = function () { pendingDraws++; return realPending.call(this); };
+  ed.draw();
+  t.check("box stays visible while picking its class", pendingDraws === 1, pendingDraws);
   const chips = [...document.querySelectorAll("#samLabelPick .sam-label-chip")];
   t.check("class picker shows every class", chips.map(c => c.textContent.trim()).join(",") === "cat,dog");
   chips[1].click(); await t.sleep(20);
   t.check("picked class lands on the annotation", ed.anns.length === 1 && ed.anns[0].class_id === 2);
   t.check("picker hides after picking", document.querySelector("#samLabelPick").hidden);
+  pendingDraws = 0; ed.draw();
+  t.check("no pending outline once the class is picked", pendingDraws === 0, pendingDraws);
 
   // ── a pending autosave still writes to the image that was edited, even if
   //    S.images/S.curImage change before the 700ms debounce fires

@@ -17,6 +17,8 @@ from . import storage
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 SPLITS = ("train", "val", "test")
+# Roboflow exports use "valid/" for the validation split.
+SPLIT_ALIASES = {"train": "train", "val": "val", "valid": "val", "validation": "val", "test": "test"}
 
 
 def _get_or_create_class(db, project: Project, by_name: dict, name: str, palette: list[str]) -> LabelClass:
@@ -73,7 +75,7 @@ def import_zip(db, project: Project, raw: bytes, palette: list[str], default_spl
     created, skipped = 0, 0
     for n in img_entries:
         parts_lower = [p.lower() for p in Path(n).parts]
-        split = next((s for s in SPLITS if s in parts_lower), default_split)
+        split = next((SPLIT_ALIASES[p] for p in parts_lower if p in SPLIT_ALIASES), default_split)
         try:
             fname, w, h = storage.save_upload(project.id, Path(n).name, zf.read(n))
         except Exception:
@@ -99,16 +101,24 @@ def import_zip(db, project: Project, raw: bytes, palette: list[str], default_spl
                     cname = class_names[ci] if class_names and ci < len(class_names) else f"class{ci}"
                     cls = _get_or_create_class(db, project, by_name, cname, palette)
                     vals = list(map(float, fields[1:]))
-                    if task == "detect" and len(vals) == 4:
+                    # Boxes and polygons are converted to whichever one the
+                    # project's task uses (e.g. a segmentation export into a
+                    # detect project keeps each polygon's bounding box).
+                    if len(vals) == 4:
                         cx, cy, bw, bh = vals
-                        data = {"x": (cx - bw / 2) * w, "y": (cy - bh / 2) * h, "w": bw * w, "h": bh * h}
-                        kind = "bbox"
-                    elif task == "segment" and len(vals) >= 6 and len(vals) % 2 == 0:
+                        x1, y1, x2, y2 = (cx - bw / 2) * w, (cy - bh / 2) * h, (cx + bw / 2) * w, (cy + bh / 2) * h
+                        pts = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+                    elif len(vals) >= 6 and len(vals) % 2 == 0:
                         pts = [[vals[i] * w, vals[i + 1] * h] for i in range(0, len(vals), 2)]
-                        data = {"points": pts}
-                        kind = "polygon"
                     else:
                         continue
+                    if task == "detect":
+                        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                        data = {"x": min(xs), "y": min(ys), "w": max(xs) - min(xs), "h": max(ys) - min(ys)}
+                        kind = "bbox"
+                    else:
+                        data = {"points": pts}
+                        kind = "polygon"
                     db.add(Annotation(image_id=im.id, class_id=cls.id, kind=kind, data=json.dumps(data)))
                     n_anns += 1
             im.status = "annotated" if n_anns else "unannotated"

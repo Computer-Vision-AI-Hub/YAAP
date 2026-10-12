@@ -1240,6 +1240,20 @@ async function viewGenerate() {
       </div>
     </div></div>`;
 
+  // Split %s always add up to 100: editing one rebalances the other two,
+  // keeping their ratio to each other.
+  const spIds = ["#spTrain", "#spVal", "#spTest"];
+  spIds.forEach(id => $(id).onchange = () => {
+    const el = $(id);
+    const v = Math.max(0, Math.min(100, Math.round(+el.value || 0)));
+    el.value = v;
+    const [a, b] = spIds.filter(o => o !== id).map(o => $(o));
+    const rest = 100 - v, oa = +a.value || 0, ob = +b.value || 0;
+    const na = oa + ob ? Math.round(rest * oa / (oa + ob)) : Math.round(rest / 2);
+    a.value = na;
+    b.value = rest - na;
+  });
+
   $$("#augOps input[type=range]").forEach(r =>
     r.oninput = () => { r.parentElement.querySelector(".val").textContent = r.value; renderSnippet(); });
   $$("#augOps input[type=checkbox]").forEach(c => c.onchange = renderSnippet);

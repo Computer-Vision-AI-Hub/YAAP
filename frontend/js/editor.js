@@ -422,6 +422,7 @@ class Editor {
       this._drawAnn(a, i === this.sel, idx, hideTags && i !== hoverIdx);
     });
     if (this.draft) this._drawDraft();
+    if (this.pendingShape) this._drawPendingShape();
     if (this.poly) this._drawPolyDraft();
     this._drawSam();
     if ((this.tool === "bbox" || this.tool === "polygon" ||
@@ -476,6 +477,25 @@ class Editor {
     ctx.setLineDash([5, 4]);
     ctx.strokeStyle = "#FFD23F"; ctx.lineWidth = 1.5;
     ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+    ctx.setLineDash([]);
+  }
+
+  // finished shape still waiting for a class pick — stays visible meanwhile
+  _drawPendingShape() {
+    const ctx = this.ctx, { kind, data } = this.pendingShape;
+    ctx.beginPath();
+    if (kind === "bbox") {
+      const [x, y] = this.toScr(data.x, data.y);
+      ctx.rect(x, y, data.w * this.view.s, data.h * this.view.s);
+    } else {
+      data.points.map(p => this.toScr(p[0], p[1]))
+        .forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+      ctx.closePath();
+    }
+    ctx.fillStyle = "rgba(255,210,63,.15)"; ctx.fill();
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = "#FFD23F"; ctx.lineWidth = 1.5;
+    ctx.stroke();
     ctx.setLineDash([]);
   }
 

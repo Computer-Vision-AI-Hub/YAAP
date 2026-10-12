@@ -193,7 +193,7 @@ EOF
   if [ -d "$HOME/Desktop" ]; then
     cp "$DESKTOP_FILE" "$HOME/Desktop/yaap.desktop"
     chmod +x "$HOME/Desktop/yaap.desktop"
-    command -v gio >/dev/null 2>&1 && gio set "$HOME/Desktop/yaap.desktop" "metadata::trusted" yes 2>/dev/null || true
+    command -v gio >/dev/null 2>&1 && gio set "$HOME/Desktop/yaap.desktop" "metadata::trusted" true 2>/dev/null || true
   fi
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
   echo "[yaap] installed desktop shortcut — find YAAP in your app launcher from now on"
