@@ -5,7 +5,7 @@ const API = {
     if (!r.ok) {
       let msg = r.statusText;
       try { msg = (await r.json()).detail || msg; } catch (_) {}
-      throw new Error(msg);
+      throw Object.assign(new Error(msg), { status: r.status });
     }
     return r.json();
   },
@@ -46,6 +46,15 @@ const API = {
   // models / inference
   models:    (pid, task)       => API._j(`/api/models?pid=${pid}&task=${task}`),
   autolabel:        (pid, b)   => API._j(`/api/projects/${pid}/autolabel`, { method: "POST", body: JSON.stringify(b) }),
+  proposals:      (pid, iid)   => API._j(`/api/projects/${pid}/images/${iid}/proposals`),
+  clearProposals: (pid, iid)   => API._j(`/api/projects/${pid}/images/${iid}/proposals`, { method: "DELETE" }),
+  samFindAll:       (pid, b)   => API._j(`/api/projects/${pid}/sam/find-all`, { method: "POST", body: JSON.stringify(b) }),
+  alScore:          (pid, b)   => API._j(`/api/projects/${pid}/active-learning/score`, { method: "POST", body: JSON.stringify(b) }),
+  alState:          (pid)      => API._j(`/api/projects/${pid}/active-learning`),
+  bootstrapState:   (pid)      => API._j(`/api/projects/${pid}/bootstrap`),
+  bootstrap:        (pid, b)   => API._j(`/api/projects/${pid}/bootstrap`, { method: "POST", body: JSON.stringify(b) }),
+  bootstrapRun:     (pid, bid) => API._j(`/api/projects/${pid}/bootstrap/${bid}`),
+  stopBootstrap:    (pid, bid) => API._j(`/api/projects/${pid}/bootstrap/${bid}/stop`, { method: "POST" }),
   autolabelJob:     (pid, jid) => API._j(`/api/projects/${pid}/autolabel/${jid}`),
   autolabelPreview: (pid, jid) => API._j(`/api/projects/${pid}/autolabel/${jid}/preview`),
   testModel: (pid, b)          => API._j(`/api/projects/${pid}/test-model`, { method: "POST", body: JSON.stringify(b) }),
@@ -59,12 +68,14 @@ const API = {
 
   // SAM
   samModels:  ()               => API._j("/api/sam/models"),
+  samWarmup:  (b)              => API._j("/api/sam/warmup", { method: "POST", body: JSON.stringify(b || {}) }),
   samPredict: (pid, iid, b)    => API._j(`/api/projects/${pid}/images/${iid}/sam`, { method: "POST", body: JSON.stringify(b) }),
 
   // datasets
   versions:      (pid)         => API._j(`/api/projects/${pid}/versions`),
   createVersion: (pid, b)      => API._j(`/api/projects/${pid}/versions`, { method: "POST", body: JSON.stringify(b) }),
   deleteVersion: (pid, vid)    => API._j(`/api/projects/${pid}/versions/${vid}`, { method: "DELETE" }),
+  versionHealth: (pid, vid)    => API._j(`/api/projects/${pid}/versions/${vid}/health`),
   versionZip:    (pid, vid)    => `/api/projects/${pid}/versions/${vid}/download`,
   exportRawUrl:  (pid, approvedOnly) => `/api/projects/${pid}/export?approved_only=${!!approvedOnly}`,
   async importDataset(pid, file, defaultSplit) {
@@ -88,5 +99,8 @@ const API = {
   jobLog:   (pid, jid, lines)  => API._j(`/api/projects/${pid}/train/${jid}/log${lines ? `?lines=${lines}` : ""}`),
   jobPlotUrl: (pid, jid, name) => `/api/projects/${pid}/train/${jid}/plot/${name}`,
   stopJob:  (pid, jid)         => API._j(`/api/projects/${pid}/train/${jid}/stop`, { method: "POST" }),
-  deleteJob: (pid, jid)        => API._j(`/api/projects/${pid}/train/${jid}`, { method: "DELETE" }),
+  deleteJob: (pid, jid, remote) => API._j(`/api/projects/${pid}/train/${jid}${remote ? "?remote=true" : ""}`, { method: "DELETE" }),
+  sshSettings: ()              => API._j(`/api/training/ssh/settings`),
+  saveSshSettings: (b)         => API._j(`/api/training/ssh/settings`, { method: "PUT", body: JSON.stringify(b) }),
+  sshTest:  (b)                => API._j(`/api/training/ssh/test`, { method: "POST", body: JSON.stringify(b) }),
 };

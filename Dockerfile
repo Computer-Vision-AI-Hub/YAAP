@@ -19,7 +19,7 @@ ENV PYTHONUNBUFFERED=1 \
     HOME=/home/yaap
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgl1 libglib2.0-0 && \
+        libgl1 libglib2.0-0 openssh-client rsync git && \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user — UID/GID default to 1000 but can be overridden at build time
@@ -60,7 +60,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.11 python3-pip python3.11-venv \
-        libgl1 libglib2.0-0 && \
+        libgl1 libglib2.0-0 openssh-client rsync git && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python3.11 /usr/local/bin/python && \
     ln -sf /usr/bin/pip3 /usr/local/bin/pip
@@ -74,7 +74,10 @@ RUN groupadd -g ${GID} yaap && useradd -m -u ${UID} -g ${GID} -s /bin/sh yaap
 WORKDIR /app
 COPY requirements.txt .
 # CUDA 12.4 torch wheels
-RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 && \
+# Ubuntu 22.04's apt pip (22.x) can't read pyproject.toml-only projects: it would install
+# ultralytics' CLIP fork as "UNKNOWN 0.0.0" with no `clip` module — upgrade pip first
+RUN python -m pip install -U pip setuptools wheel && \
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 && \
     pip install -r requirements.txt
 
 COPY backend ./backend

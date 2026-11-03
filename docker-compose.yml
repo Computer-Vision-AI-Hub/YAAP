@@ -23,11 +23,13 @@ services:
     volumes:
       - ./data:/app/data
       - ./seg_models:/app/seg_models
+      - ~/.ssh:/home/yaap/.ssh:ro   # SSH training mode (key auth); needs host UID == container UID
     restart: unless-stopped
     shm_size: "8gb"               # DataLoader workers need shared memory
     environment:
       # Download these once at first start, then the container can run air-gapped.
       PRELOAD_MODELS: "sam3.pt yolo11n.pt"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"   # less GPU memory fragmentation
     deploy:
       resources:
         reservations:
@@ -51,6 +53,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./seg_models:/app/seg_models
+      - ~/.ssh:/home/yaap/.ssh:ro   # SSH training mode (key auth); needs host UID == container UID
     restart: unless-stopped
     environment:
       PRELOAD_MODELS: "sam3.pt"

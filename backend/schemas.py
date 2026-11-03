@@ -35,6 +35,7 @@ class AnnotationsReplace(BaseModel):
 class ImagePatch(BaseModel):
     status: Optional[str] = None
     split: Optional[str] = None
+    expect_annotations: Optional[list[int]] = None   # 409 unless these are still the image's annotations
 
 
 class InferenceRequest(BaseModel):
@@ -44,8 +45,10 @@ class InferenceRequest(BaseModel):
     iou: float = 0.5
     device: str = "auto"            # auto | cpu | cuda:0 ...
     replace_existing: bool = False
-    create_missing_classes: bool = True
+    create_missing_classes: bool = False   # off: predictions of classes the project doesn't have are dropped
     class_filter: list[str] = []    # keep only these model class names, empty = all
+    # one box per object: any-class overlap at/above this IoU = the same object (1 = off) — jobs.drop_duplicates
+    max_overlap: float = Field(0.7, gt=0, le=1)
 
 
 class TestModelRequest(BaseModel):
@@ -88,3 +91,26 @@ class TrainRequest(BaseModel):
     device: str = "auto"
     patience: int = 10
     extra: dict[str, Any] = {}
+    mode: str = Field("local", pattern="^(local|ssh)$")
+
+
+class SshSettings(BaseModel):
+    host: str = ""
+    user: str = ""
+    port: int = 22
+    identity_file: str = ""
+    python: str = "~/yaap-env/bin/python"
+    workdir: str = "~/yaap_jobs"
+    cleanup: bool = False
+
+
+class BootstrapRequest(BaseModel):
+    model_arch: str = ""                       # empty = yolo11n for the project's task
+    epochs: int = Field(0, ge=0, le=500)       # 0 = auto: more passes for fewer images
+    imgsz: int = Field(640, ge=64, le=2048)
+    conf: float = Field(0.4, gt=0, lt=1)
+    iou: float = Field(0.5, gt=0, lt=1)
+    device: str = "auto"
+    refresh_unreviewed: bool = True            # also re-label images holding only unreviewed predictions
+    relabel_rejected: bool = True              # … and rejected ones whose boxes all came from a model
+    max_overlap: float = Field(0.7, gt=0, le=1)   # one box per object, see InferenceRequest

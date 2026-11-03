@@ -4,11 +4,12 @@ from sqlalchemy.orm import Session
 
 from ..config import RUNS_DIR
 from ..db import DatasetVersion, TrainJob, get_db
-from ..schemas import TrainRequest
-from ..services import trainer
+from ..schemas import SshSettings, TrainRequest
+from ..services import ssh_runner, trainer
 from .projects import project_or_404
 
 router = APIRouter(prefix="/api/projects/{pid}/train", tags=["training"])
+ssh_router = APIRouter(prefix="/api/training/ssh", tags=["training"])
 
 # ultralytics writes these straight into the run dir (RUNS_DIR/job_<id>/) once
 # training finishes — see train_worker.py's project=/name= args
@@ -16,9 +17,13 @@ PLOT_FILES = {"results": "results.png", "confusion_matrix": "confusion_matrix.pn
 
 
 def serialize_job(j: TrainJob) -> dict:
+    ssh = trainer.ssh_info(j)
     return {"id": j.id, "version_id": j.version_id, "model_arch": j.model_arch,
             "status": j.status, "weights_path": j.weights_path,
-            "created_at": j.created_at.isoformat()}
+            "created_at": j.created_at.isoformat(),
+            "mode": "ssh" if ssh else "local",
+            "ssh_host": ssh_runner.host_label(ssh["ssh"]) if ssh else None,
+            "bootstrap_round": trainer.job_params(j).get("bootstrap_round")}
 
 
 @router.get("")
@@ -69,9 +74,9 @@ def stop_job(pid: int, jid: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/{jid}")
-def delete_job(pid: int, jid: int, db: Session = Depends(get_db)):
+def delete_job(pid: int, jid: int, remote: bool = False, db: Session = Depends(get_db)):
     j = _job(db, pid, jid)
-    trainer.delete(db, j)
+    trainer.delete(db, j, remote=remote)
     return {"ok": True}
 
 
@@ -80,3 +85,25 @@ def _job(db: Session, pid: int, jid: int) -> TrainJob:
     if not j or j.project_id != pid:
         raise HTTPException(404, "Job not found")
     return j
+
+
+@ssh_router.get("/settings")
+def get_ssh_settings():
+    return ssh_runner.load_settings()
+
+
+@ssh_router.put("/settings")
+def put_ssh_settings(s: SshSettings):
+    try:
+        return ssh_runner.save_settings(s.model_dump())
+    except ssh_runner.SshError as e:
+        raise HTTPException(400, str(e))
+
+
+@ssh_router.post("/test")
+def test_ssh(s: SshSettings):
+    """Tests the settings as typed (not necessarily saved yet)."""
+    try:
+        return {"ok": True, **ssh_runner.test_connection(s.model_dump())}
+    except ssh_runner.SshError as e:
+        return {"ok": False, "error": str(e)}

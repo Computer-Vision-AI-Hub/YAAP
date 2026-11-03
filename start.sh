@@ -1,10 +1,9 @@
 #!/bin/sh
-# Runs as the unprivileged "yaap" user — optionally pre-download model
-# weights into the mounted data volume so subsequent runs work fully offline.
+#Bash script to start the server, preloading models if requested
 set -e
 if [ -n "$PRELOAD_MODELS" ]; then
   echo "[yaap] preloading models: $PRELOAD_MODELS"
-  python3 - << 'PY' || echo "[yaap] preload failed (no network?) — continuing; upload .pt files via the UI."
+  python - << 'PY' || echo "[yaap] preload failed (no network?) — continuing; upload .pt files via the UI."
 import os
 names = os.environ.get("PRELOAD_MODELS", "").split()
 if names:

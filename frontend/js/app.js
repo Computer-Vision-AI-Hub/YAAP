@@ -10,17 +10,19 @@ const S = { project: null, images: [], curImage: -1, editor: null, saveTimer: nu
             // which QC section's images to confine Prev/Next + the counter to, and
             // whether to flag already-annotated images
             pendingImageId: null, annotateScope: null, warnIfAnnotated: false,
+            // one-shot: confine the next Quick Review to these image ids (a Bootstrap round)
+            reviewOnly: null,
             // set by viewAnnotate() while it's the active view; lets the Home button
             // (and reaching the last image) run the same save+push-to-review confirm
             // as the editor's own Exit button, instead of just jumping away silently
             onLeaveAnnotate: null };
 
 /* ── plumbing ─────────────────────────────────────────────────────── */
-function toast(msg, kind = "") {
+function toast(msg, kind = "", ms = 4200) {
   const el = document.createElement("div");
   el.className = `toast ${kind}`; el.textContent = msg;
   $("#toastHost").append(el);
-  setTimeout(() => el.remove(), 4200);
+  setTimeout(() => el.remove(), ms);
 }
 const err = e => toast(e.message || String(e), "err");
 
@@ -84,7 +86,7 @@ async function route() {
   $("#topbarMid").innerHTML = `
     <span class="proj-crumb">${esc(S.project.name)}</span>
     <span class="task-badge ${S.project.task_type}">${S.project.task_type}</span>
-    <span class="chip mono">${S.project.image_count} imgs · ${S.project.annotated_count} labeled</span>`;
+    <span class="chip mono" title="labeled = done or checked by a person; predicted = model output nobody has reviewed yet">${S.project.image_count} imgs · ${S.project.annotated_count} labeled${S.project.predicted_count ? ` · ${S.project.predicted_count} predicted` : ""}</span>`;
   ({ upload: viewUpload, annotate: viewAnnotate, review: viewReview, quickreview: viewQuickReview,
      classes: viewClasses, autolabel: viewAutolabel,
      generate: viewGenerate, versions: viewVersions, train: viewTrain,
@@ -109,6 +111,7 @@ async function viewHome() {
           <div class="proj-stats">
             <span><b>${p.image_count}</b> images</span>
             <span><b>${p.annotated_count}</b> labeled</span>
+            ${p.predicted_count ? `<span title="model output nobody has reviewed yet"><b>${p.predicted_count}</b> predicted</span>` : ""}
             <span><b>${p.class_count}</b> classes</span>
             <span><b>${p.version_count}</b> versions</span>
           </div>
@@ -120,7 +123,9 @@ async function viewHome() {
   $$(".proj-card[data-id]").forEach(c => {
     c.onclick = e => { if (!e.target.matches(".del")) location.hash = `#/p/${c.dataset.id}/review`; };
     $(".del", c).onclick = async () => {
-      if (!confirm("Delete this project and all of its data on disk?")) return;
+      const name = $("h2", c).textContent;
+      if (!confirm(`Delete project "${name}"? Its images, labels, dataset versions, training runs and model ` +
+                   "weights are deleted from disk. This can't be undone.")) return;
       try { await API.deleteProject(+c.dataset.id); viewHome(); } catch (e) { err(e); }
     };
   });
@@ -238,8 +243,8 @@ async function viewUpload() {
     let n = 0;
     try {
       const res = await API.upload(p.id, files, () => { dz.textContent = `Uploading ${++n} / ${files.length}…`; });
-      toast(`Uploaded ${res.created.length} image(s)` +
-            (res.skipped.length ? `, skipped ${res.skipped.length}` : ""), "ok");
+      toast(`✓ Uploaded ${res.created.length} image(s)` +
+            (res.skipped.length ? `, skipped ${res.skipped.length}` : ""), "ok", 8000);
     } catch (e) { err(e); }
     route();
   }
@@ -253,14 +258,15 @@ async function viewUpload() {
   $("#impGo").onclick = async () => {
     const f = $("#impFile").files[0];
     if (!f) return toast("Choose a .zip file first.", "err");
-    const btn = $("#impGo"); btn.disabled = true;
+    const btn = $("#impGo"), label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Importing…";
     try {
       const res = await API.importDataset(p.id, f);
-      toast(`Imported ${res.images_created} image(s)` +
-            (res.images_skipped ? `, skipped ${res.images_skipped}` : ""), "ok");
+      toast(`✓ Imported ${res.images_created} image(s)` +
+            (res.images_skipped ? `, skipped ${res.images_skipped}` : ""), "ok", 8000);
       route();
     } catch (e) { err(e); }
-    btn.disabled = false;
+    btn.disabled = false; btn.textContent = label;
   };
 
   try {
@@ -295,7 +301,7 @@ const QC_FILTERS = [
   ["auto-annotated", "Auto-annotated"], ["needs_reannotation", "Needs re-annotation"],
   ["approved", "Approved"],
 ];
-const qcMatch = (im, filter) => filter === "reviewable"
+const qcMatch = (im, filter) => filter === "proposals" ? im.proposal_count > 0 : filter === "reviewable"
   ? (im.status === "annotated" || im.status === "auto-annotated" || im.status === "empty" || im.status === "review")
   : im.status === filter;
 
@@ -394,6 +400,45 @@ async function viewReview() {
   render();
 }
 
+// The pixel box an annotation covers (polygons by their bounding box), and box overlap.
+function annBox(a) {
+  if (a.kind === "bbox") return a.data;
+  if (a.kind !== "polygon" || !a.data.points?.length) return null;
+  const xs = a.data.points.map(q => q[0]), ys = a.data.points.map(q => q[1]);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+}
+// Overlap of two outlines by area (rasterized) — two triangles splitting one square share a box,
+// not an object.
+function polyIou(p, q) {
+  const all = p.concat(q), xs = all.map(v => v[0]), ys = all.map(v => v[1]);
+  const x0 = Math.min(...xs), y0 = Math.min(...ys);
+  const s = 128 / Math.max(Math.max(...xs) - x0, Math.max(...ys) - y0, 1);
+  const W = Math.ceil((Math.max(...xs) - x0) * s) + 2, H = Math.ceil((Math.max(...ys) - y0) * s) + 2;
+  const fill = poly => {
+    const c = document.createElement("canvas"); c.width = W; c.height = H;
+    const g = c.getContext("2d");
+    g.beginPath();
+    poly.forEach(([x, y], i) => i ? g.lineTo((x - x0) * s, (y - y0) * s) : g.moveTo((x - x0) * s, (y - y0) * s));
+    g.closePath(); g.fill();
+    return g.getImageData(0, 0, W, H).data;
+  };
+  const A = fill(p), B = fill(q);
+  let inter = 0, union = 0;
+  for (let i = 3; i < A.length; i += 4) {
+    const a = A[i] > 127, b = B[i] > 127;
+    if (a && b) inter++;
+    if (a || b) union++;
+  }
+  return union ? inter / union : 0;
+}
+function boxIou(a, b) {
+  const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const u = a.w * a.h + b.w * b.h - ix * iy;
+  return u > 0 ? ix * iy / u : 0;
+}
+
 // Shared by Quick Review and the auto-label preview grid: annotations -> SVG shapes + labels.
 function annotationShapesSvg(anns, classes, imgWidth) {
   const strokeW = Math.max(2, Math.round(imgWidth / 350));
@@ -411,6 +456,8 @@ function annotationShapesSvg(anns, classes, imgWidth) {
       const pts = a.data.points.map(pt => pt.join(",")).join(" ");
       shape = `<polygon points="${pts}" fill="${color}33" stroke="${color}" stroke-width="${strokeW}"/>`;
       [lx, ly] = a.data.points[0];
+    } else if (a.kind === "classification") {
+      shape = ""; lx = 0; ly = 0;                   // whole-image class: just the tag, top-left
     } else return "";
     // label tag — clamped so it never sits above the image's own top edge
     const labelY = Math.max(fontSize + 4, ly);
@@ -442,6 +489,11 @@ async function viewQuickReview() {
   try { images = await API.images(p.id); } catch (e) { return err(e); }
 
   let queue = images.filter(im => qcMatch(im, mode === "approved" ? "approved" : "reviewable"));
+  if (S.reviewOnly) {
+    const only = new Set(S.reviewOnly);
+    queue = queue.filter(im => only.has(im.id));
+    S.reviewOnly = null;
+  }
   if (S.pendingImageId != null) {
     const i = queue.findIndex(x => x.id === S.pendingImageId);
     if (i > 0) queue = queue.slice(i);
@@ -453,7 +505,7 @@ async function viewQuickReview() {
     return;
   }
 
-  let idx = 0, zoom = 1;
+  let idx = 0, zoom = 1, shownAnnIds = [];
 
   function onKey(e) {
     if (e.target.matches("input,textarea,select")) return;
@@ -483,6 +535,7 @@ async function viewQuickReview() {
     const im = queue[idx];
     let anns = [];
     try { anns = await API.annotations(p.id, im.id); } catch (e) { /* show image without overlays */ }
+    shownAnnIds = anns.map(a => a.id);
 
     const shapes = annotationShapesSvg(anns, p.classes, im.width);
     zoom = 1;
@@ -536,7 +589,13 @@ async function viewQuickReview() {
 
   async function decide(status) {
     const im = queue[idx];
-    try { await API.patchImage(p.id, im.id, { status }); } catch (e) { return err(e); }
+    // Accept approves what was shown — a Bootstrap round may have replaced it meanwhile
+    const body = status === "approved" ? { status, expect_annotations: shownAnnIds } : { status };
+    try { await API.patchImage(p.id, im.id, body); }
+    catch (e) {
+      if (e.status === 409) { toast(e.message); return renderCurrent(); }
+      return err(e);
+    }
     idx++;
     if (idx >= queue.length) {
       toast("Review queue complete!", "ok");
@@ -574,7 +633,10 @@ async function viewClasses() {
       <input class="input" id="clsName" placeholder="New class name" style="flex:1">
       <button class="btn primary" id="clsAdd">Add class</button>
     </div>
-    <div id="clsList"></div></div>`;
+    <div id="clsList"></div>
+    <div class="card" id="clsProposals" style="margin-top:16px" hidden></div></div>`;
+  let waiting = 0;                       // images with SAM-outlined objects that still need a class
+  API.images(p.id).then(ims => { waiting = ims.filter(im => im.proposal_count > 0).length; render(); }).catch(() => {});
 
   function render() {
     $("#clsList").innerHTML = S.project.classes.map((c, i) => `
@@ -585,6 +647,14 @@ async function viewClasses() {
         <span class="idx">idx ${i} · key ${i < 9 ? i + 1 : "—"}</span>
         <button class="btn ghost small">✕</button>
       </div>`).join("") || `<div class="empty">No classes yet — add one above.</div>`;
+    const box = $("#clsProposals");
+    box.hidden = !(waiting && S.project.classes.length);
+    if (!box.hidden) {
+      box.innerHTML = `<div class="row" style="align-items:center;justify-content:space-between;gap:12px">
+        <span class="sub" style="margin:0">SAM outlined objects in <b>${waiting}</b> image(s) — they're waiting for a class.</span>
+        <button class="btn primary" id="clsLabelFound">Label them →</button></div>`;
+      $("#clsLabelFound").onclick = () => { S.annotateScope = "proposals"; nav("annotate"); };
+    }
     $$(".class-row").forEach(row => {
       const cid = +row.dataset.id;
       $("input[type=color]", row).onchange = async e => {
@@ -628,9 +698,29 @@ async function viewAnnotate() {
     // images — a snapshot taken now, not re-filtered as statuses change
     // during the session (so the count doesn't shift under you mid-edit)
     const scoped = S.images.filter(im => qcMatch(im, S.annotateScope));
-    if (scoped.length) S.images = scoped;
+    if (!scoped.length) {
+      S.annotateScope = null;
+      $("#stage").innerHTML = `<div class="stage-pad"><div class="empty">
+        No images to annotate. <br><br>
+        <button class="btn primary" onclick="location.hash='#/'">Return to Home</button></div></div>`;
+      return;
+    }
+    S.images = scoped;
   }
   S.annotateScope = null;   // one-shot — only applies to this entry, not future navigation
+
+  // active learning: ranked images exist → offer to walk them most-uncertain first
+  // (unlabeled images only; everything else keeps its order, after them)
+  const hasScores = S.images.some(im => im.uncertainty != null);
+  let uncOn = false;
+  try { uncOn = hasScores && localStorage.getItem("yaap.uncertainFirst") === "1"; } catch (_) {}
+  if (uncOn) {
+    const ranked = S.images.filter(im => im.uncertainty != null && !im.annotation_count)
+      .sort((a, b) => b.uncertainty - a.uncertainty);
+    const rest = S.images.filter(im => !ranked.includes(im));
+    S.images = [...ranked, ...rest];
+    if (S.pendingImageId == null) S.curImage = 0;     // the top of the ranking is always the next one to label
+  }
 
   if (S.pendingImageId != null) {
     const i = S.images.findIndex(x => x.id === S.pendingImageId);
@@ -646,6 +736,9 @@ async function viewAnnotate() {
   if (!p.classes.some(c => c.id === S.activeClassId)) S.activeClassId = p.classes[0].id;
 
   const isCls = p.task_type === "classify";
+  // class-by-class labeling state of a "find all" result (see startWalk) — declared before the
+  // Editor is built: its constructor already calls back into updateSamStrip(), which reads it
+  let walk = null;
   $("#stage").innerHTML = `
   <div class="editor">
     <div class="ed-canvas-wrap">
@@ -666,6 +759,9 @@ async function viewAnnotate() {
           <span class="mono" id="samSimplifyVal">0.008</span>
         </label>
         <span class="sam-hint mono" id="samHint">click ＋ · shift-click − · drag box</span>
+        <button class="btn small" id="samFindAll" hidden title="Find every object like the boxed one in this image (E) — ctrl-click a match to exclude it">E</button>
+        <label class="sam-simplify" id="samConfWrap" hidden title="Minimum match score">min score
+          <input class="input" id="samConf" type="number" min="5" max="95" step="5" value="25" style="width:56px;display:inline-block">%</label>
         <button class="btn small primary" id="samAccept" hidden>✓ Accept <span class="kbd">↵</span></button>
         <button class="btn small" id="samDiscard" hidden>✕ <span class="kbd">Esc</span></button>
       </div>
@@ -674,6 +770,9 @@ async function viewAnnotate() {
         <span class="fn mono" id="edFn"></span>
         <span class="savestate" id="saveState">saved</span>
         <span class="chip warn" id="edAnnotatedWarn" hidden>⚠ already annotated</span>
+        <button class="btn small primary" id="edProposals" hidden title="This image has objects SAM outlined that still need a class">⌖ Label found objects</button>
+        <label class="chip" id="edUncWrap" hidden title="Order images by model uncertainty (rank them on the Auto-label page)">
+          <input type="checkbox" id="edUnc"> Most uncertain first</label>
         <button class="btn small" id="edReject" title="Flag this image as needing re-work">✕ Reject</button>
         <button class="btn small" id="edApprove" title="Mark this image as QC-approved">✓ Approve</button>
         <button class="btn small ghost" id="edExit" title="Save and exit the annotator">⏏ Exit</button>
@@ -704,6 +803,8 @@ async function viewAnnotate() {
     onClassKey: i => { const c = p.classes[i]; if (c) { S.activeClassId = c.id; renderSide(); } },
     onSamPrompt: runSamPrompt,
     onSamAccept: acceptSam,
+    onSamFindAll: () => findAllLikeThis(),
+    onSamToggle: ed => { updateSamStrip(ed); samHint(`${ed.samPending.filter(r => !r.off).length}/${ed.samPending.length} match(es) kept — ctrl-click to toggle, then Accept`); },
     onSamState: updateSamStrip,
     onPendingShape: renderLabelPick,
   });
@@ -744,14 +845,22 @@ async function viewAnnotate() {
 
       if (!samInfo.ultralytics)
         toast("SAM needs ultralytics installed on the server (pip install ultralytics).", "err");
+      else {                       // load SAM in the background so the first click / E isn't slow
+        samHint("warming up SAM…");
+        API.samWarmup({ model_name: $("#samModel").value })
+          .then(() => samHint("click ＋ · shift-click − · drag box"))
+          .catch(() => samHint("click ＋ · shift-click − · drag box"));
+      }
       samReady = true;
     } catch (e) { err(e); }
   }
   function samHint(t) { const h = $("#samHint"); if (h) h.textContent = t; }
   function updateSamStrip(ed) {
     const has = ed.samPending.length > 0;
+    if (!has) walk = null;
     const a = $("#samAccept"), d = $("#samDiscard");
     if (a) { a.hidden = !has; d.hidden = !has && !ed.samPts.length && !ed.samBox; }
+    if ($("#samFindAll")) { $("#samFindAll").hidden = !ed.samBox; $("#samConfWrap").hidden = !ed.samBox; }
     if (!has) samHint("click ＋ · shift-click − · drag box");
     renderLabelPick();
   }
@@ -759,9 +868,128 @@ async function viewAnnotate() {
   /* small class picker that pops up right next to a fresh SAM mask, or a
      freshly-drawn manual bbox/polygon (editor.pendingShape) — click a class
      to label + finish it in one step, no sidebar detour either way. */
+  /* class-by-class walkthrough of a "find all" result: each match is highlighted in turn,
+     you pick its class (click or 1–9) or delete it if it's wrong; Done keeps what's labeled. */
+  function startWalk(fromProposals = false) {
+    if (!editor.samPending.length) return;
+    if (!p.classes.length) return toast("Add at least one class first.", "err");
+    editor.samPending.forEach(r => { r.cls = null; r.cur = false; r.off = false; delete r.color; delete r.label; });
+    walk = { i: 0, proposals: fromProposals };
+    focusWalk(0);
+  }
+  function walkLabeled() { return editor.samPending.filter(r => r.cls); }
+  function focusWalk(i) {
+    const pend = editor.samPending;
+    walk.i = Math.max(0, Math.min(pend.length - 1, i));
+    pend.forEach((r, k) => { r.cur = k === walk.i; });
+    samHint(`label box ${walk.i + 1}/${pend.length} — pick a class (1–9) · Del removes the box`);
+    renderLabelPick();
+    revealBox(pend[walk.i].bbox);
+    editor.draw();
+  }
+  // pan (never zoom) so the whole box is on screen and not under the fixed class panel (bottom-right)
+  function revealBox(b) {
+    const cw = editor.cv.clientWidth, ch = editor.cv.clientHeight, v = editor.view, m = 30;
+    const panel = $("#samLabelPick");
+    const pl = cw - (panel ? panel.offsetWidth : 0) - 24, pt = ch - (panel ? panel.offsetHeight : 0) - 24;
+    let [x0, y0] = editor.toScr(b.x, b.y), [x1, y1] = editor.toScr(b.x + b.w, b.y + b.h);
+    let dx = 0, dy = 0;
+    if (x0 < m) dx = m - x0; else if (x1 > cw - m) dx = Math.max(cw - m - x1, m - x0);
+    if (y0 < m + 20) dy = m + 20 - y0; else if (y1 > ch - m) dy = Math.max(ch - m - y1, m + 20 - y0);
+    x0 += dx; x1 += dx; y0 += dy; y1 += dy;
+    if (x1 > pl && y1 > pt) {                       // overlaps the panel → slide left if room, else up
+      if (x0 - (x1 - pl) - 10 >= m) dx -= x1 - pl + 10; else dy -= y1 - pt + 10;
+    }
+    if (dx || dy) { v.tx += dx; v.ty += dy; }
+  }
+  function walkNextUnlabeled(from) {
+    const pend = editor.samPending, n = pend.length;
+    for (let k = 1; k <= n; k++) { const j = (from + k) % n; if (!pend[j].cls) return j; }
+    return -1;
+  }
+  function walkAssign(cid) {
+    const r = editor.samPending[walk.i], c = p.classes.find(x => x.id === cid);
+    if (!r || !c) return;
+    r.cls = cid; r.color = c.color; r.label = c.name;
+    const nx = walkNextUnlabeled(walk.i);
+    if (nx < 0) return finishWalk();
+    focusWalk(nx);
+  }
+  function walkDelete() {
+    editor.samPending.splice(walk.i, 1);
+    if (!editor.samPending.length) { walk = null; editor.clearSam(); return; }
+    const nx = walkNextUnlabeled(walk.i - 1);
+    if (nx < 0) return finishWalk();
+    focusWalk(nx);
+  }
+  function finishWalk() {
+    if (!walk) return;                      // already finished (the last class pick ends it)
+    const done = walkLabeled(), fromProposals = walk.proposals;
+    for (const r of done) pushSamAnn(r, p.classes.find(c => c.id === r.cls));
+    const dropped = editor.samPending.length - done.length;
+    toast(`Added ${done.length} labeled ${p.task_type === "detect" ? "box(es)" : "polygon(s)"}` +
+          (dropped ? ` · ${dropped} unlabeled left out` : ""), "ok");
+    walk = null;
+    editor.clearSam(false);
+    markDirty(); renderAnnList(); editor.draw();
+    if (fromProposals) afterProposalWalk();
+  }
+  function cancelWalk() {
+    const n = walkLabeled().length;
+    if (n && !confirm(`Discard ${n} labeled box(es)?`)) return;
+    walk = null; editor.clearSam();
+  }
+  function renderWalkPanel(box) {
+    const pend = editor.samPending, r = pend[walk.i];
+    const b = r.bbox;
+    box.className = "sam-label-pick walk";
+    box.innerHTML = `
+      <div class="sam-walk-head">Box ${walk.i + 1} / ${pend.length} · ${Math.round(r.score * 100)}% · ${walkLabeled().length} labeled</div>
+      ${p.classes.map((c, i) => `<button class="sam-label-chip" data-id="${c.id}">
+        <span class="swatch" style="background:${c.color}"></span>${esc(c.name)}${i < 9 ? ` <span class="kbd">${i + 1}</span>` : ""}</button>`).join("")}
+      <div class="sam-walk-actions">
+        <button class="btn small danger" id="walkDel" title="This box is wrong — erase it (Del / X)">🗑 Erase box</button>
+        <button class="btn small" id="walkPrev" title="Previous (←)">←</button>
+        <button class="btn small" id="walkNext" title="Skip to next (→)">Skip →</button>
+        <button class="btn small primary" id="walkDone" title="Keep the labeled boxes and finish (Enter)">✓ Done</button>
+        <button class="btn small ghost" id="walkCancel" title="Discard all (Esc)">✕</button>
+      </div>`;
+    $$(".sam-label-chip", box).forEach(b2 => b2.onclick = () => walkAssign(+b2.dataset.id));
+    $("#walkDel").onclick = walkDelete;
+    $("#walkPrev").onclick = () => focusWalk(walk.i - 1);
+    $("#walkNext").onclick = () => focusWalk(walk.i + 1);
+    $("#walkDone").onclick = finishWalk;
+    $("#walkCancel").onclick = cancelWalk;
+    // fixed spot (bottom-right of the canvas, see .sam-label-pick.walk) — always the same place, never over the box
+    box.style.left = box.style.top = box.style.maxHeight = box.style.maxWidth = "";
+    box.hidden = false;
+    box.scrollTop = 0;
+  }
+  function walkKey(e) {
+    if (walk && !editor.samPending.length) walk = null;      // image changed / cleared underneath us
+    if (!walk || e.target.matches("input,textarea,select,[contenteditable]") || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    let handled = true;
+    if (/^[1-9]$/.test(k)) { const c = p.classes[+k - 1]; if (c) walkAssign(c.id); }
+    else if (k === "delete" || k === "backspace" || k === "x") walkDelete();
+    else if (e.key === "ArrowRight" || e.key === "Tab" && !e.shiftKey) focusWalk(walk.i + 1);
+    else if (e.key === "ArrowLeft" || e.key === "Tab" && e.shiftKey) focusWalk(walk.i - 1);
+    else if (e.key === "Enter") finishWalk();
+    else if (e.key === "Escape") cancelWalk();
+    else handled = false;
+    if (handled) { e.preventDefault(); e.stopPropagation(); }
+  }
+  window.addEventListener("keydown", walkKey, true);
+  window.addEventListener("hashchange", function stopWalkKeys() {
+    window.removeEventListener("keydown", walkKey, true);
+    window.removeEventListener("hashchange", stopWalkKeys);
+  });
+
   function renderLabelPick() {
     const box = $("#samLabelPick");
     if (!box) return;
+    if (walk && editor.samPending.length) return renderWalkPanel(box);
+    box.className = "sam-label-pick";
     const pending = editor.pendingShape, mask = editor.samPending[0];
     if (!p.classes.length || (!pending && !mask)) { box.hidden = true; return; }
     box.innerHTML = p.classes.map(c => `
@@ -786,39 +1014,76 @@ async function viewAnnotate() {
       : { type: "point", points: ed.samPts.map(q => [q[0], q[1]]), labels: ed.samPts.map(q => q[2]) };
     await callSam(prompt);
   }
-  async function callSam(prompt) {
+  async function findAllLikeThis() {
+    const b = editor.samBox;
+    if (!b || samBusy) return toast("Draw a box around one example first.", "err");
+    await callSam({ type: "exemplar", box: [b.x0, b.y0, b.x1, b.y1] },
+                  { conf: Math.min(0.95, Math.max(0.05, (+$("#samConf").value || 25) / 100)) });
+  }
+  $("#samFindAll") && ($("#samFindAll").onclick = () => findAllLikeThis());
+  async function callSam(prompt, extra = {}) {
     const im = S.images[S.curImage];
-    samBusy = true; samHint("segmenting…");
+    const exemplar = prompt.type === "exemplar";
+    samBusy = true; samHint(exemplar ? "searching for similar objects…" : "segmenting…");
     try {
       const r = await API.samPredict(p.id, im.id,
-        { model_name: $("#samModel").value, prompt, simplify: +$("#samSimplify").value });
-      editor.samPending = r.results || [];
+        { model_name: $("#samModel").value, prompt, simplify: +$("#samSimplify").value, ...extra });
+      let found = r.results || [], already = 0;
+      if (exemplar) {                    // "find all like this": skip objects that already have a box
+        const taken = editor.anns.filter(a => annBox(a));
+        const same = (m, a) => {             // segment projects compare outlines, detect ones boxes
+          const o = boxIou(m.bbox, annBox(a));
+          return o > 0 && a.kind === "polygon" && m.polygon?.length ? polyIou(m.polygon, a.data.points) : o;
+        };
+        const fresh = found.filter(m => !taken.some(a => same(m, a) >= 0.7));
+        already = found.length - fresh.length;
+        found = fresh;
+      }
+      editor.samPending = found;
+      const note = already ? ` · ${already} already labeled` : "";
       samHint(editor.samPending.length
-        ? `${editor.samPending.length} mask(s) — refine with more clicks, then Accept`
-        : "no mask found — add clicks or adjust the box");
+        ? (exemplar ? `${editor.samPending.length} match(es)${note} — ctrl-click one to exclude, then Accept`
+                    : `${editor.samPending.length} mask(s) — refine with more clicks, then Accept`)
+        : already ? `every match is already labeled (${already})` : "no mask found — add clicks or adjust the box");
     } catch (e) { samHint(""); err(e); }
     samBusy = false;
     updateSamStrip(editor); editor.draw();
+    if (exemplar && editor.samPending.length) startWalk();
   }
   $("#samAccept") && ($("#samAccept").onclick = () => acceptSam());
   $("#samDiscard") && ($("#samDiscard").onclick = () => editor.clearSam());
+  function pushSamAnn(r, cls) {
+    if (p.task_type === "detect")            // segmentation → detection format
+      editor.anns.push({ class_id: cls.id, kind: "bbox", source: "model",
+        confidence: r.score, data: { ...r.bbox } });
+    else                                     // instance segmentation format
+      editor.anns.push({ class_id: cls.id, kind: "polygon", source: "model",
+        confidence: r.score, data: { points: r.polygon.map(q => [q[0], q[1]]) } });
+  }
   function acceptSam(clsId) {
-    if (!editor.samPending.length) return;
+    if (walk) return finishWalk();
+    const kept = editor.samPending.filter(r => !r.off);
+    if (!kept.length) return;
     const cls = p.classes.find(c => c.id === (clsId ?? S.activeClassId));
     if (!cls) return toast("Pick a class first.", "err");
-    for (const r of editor.samPending) {
-      if (p.task_type === "detect")            // segmentation → detection format
-        editor.anns.push({ class_id: cls.id, kind: "bbox", source: "model",
-          confidence: r.score, data: { ...r.bbox } });
-      else                                     // instance segmentation format
-        editor.anns.push({ class_id: cls.id, kind: "polygon", source: "model",
-          confidence: r.score, data: { points: r.polygon.map(q => [q[0], q[1]]) } });
-    }
-    toast(`Added ${editor.samPending.length} ${p.task_type === "detect" ? "box(es)" : "polygon(s)"} as “${cls.name}”.`, "ok");
+    for (const r of kept) pushSamAnn(r, cls);
+    toast(`Added ${kept.length} ${p.task_type === "detect" ? "box(es)" : "polygon(s)"} as “${cls.name}”.`, "ok");
     editor.clearSam(false);
     markDirty(); renderAnnList(); editor.draw();
   }
 
+  if (hasScores) {                  // "Most uncertain first" — needs a ranking (Auto-label → Active learning)
+    $("#edUncWrap").hidden = false;
+    $("#edUnc").checked = uncOn;
+    $("#edUnc").onchange = async e => {
+      try { localStorage.setItem("yaap.uncertainFirst", e.target.checked ? "1" : "0"); } catch (_) {}
+      await save();
+      // on: start at the top of the ranking; off: stay on the image you're on
+      S.pendingImageId = e.target.checked ? null : S.images[S.curImage]?.id ?? null;
+      S.curImage = 0;
+      route();
+    };
+  }
   $("#prevImg").onclick = () => go(S.curImage - 1);
   $("#nextImg").onclick = () => go(S.curImage + 1);
   window.onkeydown = e => {
@@ -888,6 +1153,30 @@ async function viewAnnotate() {
     $("#edHud").textContent = `${im.width}×${im.height}px`;
     renderApprove(); renderReject(); renderMarkEmpty();
     renderSide();
+    renderProposalsBtn();
+    if (im.proposal_count > 0 && !isCls) startProposalWalk();     // objects waiting for a class → ask right away
+  }
+  function renderProposalsBtn() {
+    const b = $("#edProposals"), im = S.images[S.curImage];
+    if (b && im) { b.hidden = !(im.proposal_count > 0); b.textContent = `⌖ Label found objects (${im.proposal_count})`; }
+  }
+  $("#edProposals") && ($("#edProposals").onclick = () => startProposalWalk());
+  async function startProposalWalk() {
+    const im = editingImage;
+    let props = [];
+    try { props = await API.proposals(p.id, im.id); } catch (e) { return err(e); }
+    if (editingImage !== im || !props.length) return;
+    editor.samPending = props.map(r => ({ polygon: r.polygon, bbox: r.bbox, score: r.score, label: "" }));
+    startWalk(true);
+  }
+  // after a proposal walk: drop the leftover proposals and jump to the next image that still has some
+  async function afterProposalWalk() {
+    const im = editingImage;
+    try { await API.clearProposals(p.id, im.id); } catch (e) { return err(e); }
+    im.proposal_count = 0; renderProposalsBtn();
+    const next = S.images.findIndex((x, i) => i > S.curImage && x.proposal_count > 0);
+    if (next >= 0) await go(next);
+    else toast("All found objects are labeled.", "ok");
   }
 
   function renderApprove() {
@@ -1035,6 +1324,35 @@ async function viewAutolabel() {
 
   $("#stage").innerHTML = `<div class="stage-pad" style="max-width:680px">
     <h1 class="page">Auto-label</h1>
+    <h3 class="sect">Bootstrap — label a few, YAAP labels the rest</h3>
+    <div class="card" id="bsCard">
+      <p class="sub" style="margin-top:0">Label about 10 images by hand. Bootstrap trains a small model on them
+        (about a minute on a GPU) and pre-labels every image nobody has labeled yet. Accept or reject its work in
+        <b>Review</b>, then run another round — each round learns from everything you labeled or accepted.</p>
+      <div class="bs-stats" id="bsStats">…</div>
+      <details class="hp-details"><summary>Options</summary><div class="hp-body">
+        <div class="grid2">
+          <div><label class="fld">Base model</label><select class="input" id="bsModel"></select></div>
+          <div><label class="fld">Epochs</label>
+            <input class="input" id="bsEpochs" type="number" min="0" max="500" step="10" placeholder="auto"></div>
+          <div><label class="fld">Min confidence</label>
+            <input class="input" id="bsConf" type="number" min="0.05" max="0.95" step="0.05" value="0.4"></div>
+          <div><label class="fld" title="Boxes on the same object are kept once: the same class overlapping by IoU 0.5 or more, or any class overlapping by at least this value. The higher score wins; a box that is already on the image always wins. 1 = keep everything.">Duplicate overlap (IoU)</label>
+            <input class="input" id="bsOverlap" type="number" min="0.1" max="1" step="0.05" value="0.7"
+              title="Boxes on the same object are kept once: the same class overlapping by IoU 0.5 or more, or any class overlapping by at least this value. The higher score wins; a box that is already on the image always wins. 1 = keep everything."></div>
+        </div>
+        <label class="fld"><input type="checkbox" id="bsRefresh" checked> Also re-label images whose predictions
+          nobody has reviewed yet (auto-annotated) with the new model</label>
+        <label class="fld"><input type="checkbox" id="bsRejected" checked> Also re-label rejected images
+          (<i>Needs re-annotation</i>) with the new model — only boxes a model made are replaced</label>
+      </div></details>
+      <div class="row" style="margin-top:14px;align-items:center;gap:10px">
+        <button class="btn primary" id="bsGo" disabled>⚡ Bootstrap</button>
+        <span class="chip" id="bsHint" hidden></span>
+      </div>
+      <div id="bsProgress"></div>
+    </div>
+    <h3 class="sect">Run a model</h3>
     <p class="sub">Run a YOLO${(models.rtdetr || []).length ? ", RT-DETR" : ""}${models.rfdetr_available ? " or RF-DETR" : ""} model over your images and
       turn its predictions into editable annotations. Model output is marked
       <span style="color:var(--teal)">for review</span> so you can verify each image in the editor.
@@ -1049,10 +1367,14 @@ async function viewAutolabel() {
           <select class="input" id="alScope">
             <option value="all">All images</option>
             <option value="unannotated">Only images without annotations</option>
+            <option value="rejected">Rejected images (needs re-annotation)</option>
           </select></div>
+        <div><label class="fld" title="Boxes on the same object are kept once: the same class overlapping by IoU 0.5 or more, or any class overlapping by at least this value. The higher score wins; a box that is already on the image always wins. 1 = keep everything.">Duplicate overlap (IoU)</label>
+          <input class="input" id="alOverlap" type="number" min="0.1" max="1" step="0.05" value="0.7"
+            title="Boxes on the same object are kept once: the same class overlapping by IoU 0.5 or more, or any class overlapping by at least this value. The higher score wins; a box that is already on the image always wins. 1 = keep everything."></div>
       </div>
       <label class="fld"><input type="checkbox" id="alReplace"> Replace existing annotations on each image</label>
-      <label class="fld"><input type="checkbox" id="alCreate" checked> Create project classes from model class names</label>
+      <label class="fld" title="Off: only your project's classes are kept — predictions of any other class are dropped"><input type="checkbox" id="alCreate"> Also add new project classes for model classes I don't have (e.g. all 80 COCO classes)</label>
       <div class="row" style="margin-top:16px">
         <button class="btn primary" id="alGo">Run auto-label</button>
         <span class="chip mono" id="alStatus"></span>
@@ -1060,6 +1382,58 @@ async function viewAutolabel() {
       <div id="alProgress"></div>
     </div>
     <div id="alPreview"></div>
+    ${p.task_type === "classify" ? "" : `
+    <h3 class="sect">Find all by concept — SAM 3</h3>
+    <div class="card">
+      <p class="sub" style="margin-top:0">Type what to look for (e.g. “USB port”) and SAM 3 finds every instance across
+        your images. Results are saved as model predictions with their scores — check the least confident first in
+        <b>Review</b>. (To find look-alikes of one specific object, use <span class="kbd">E</span> in the editor.)</p>
+      <div class="row" id="faMode" style="margin-bottom:12px;gap:8px">
+        <button class="btn small primary" data-mode="classes" title="SAM looks for each class by its name/phrase and labels matches automatically">By class</button>
+        <button class="btn small ghost" data-mode="generic" title="SAM outlines every object without classes; you then give each one a class in the editor">Generic — outline everything, label later</button>
+      </div>
+      <div id="faGeneric" hidden>
+        <label class="fld">Generic phrases (comma-separated nouns SAM should look for)</label>
+        <input class="input" id="faPhrases" value="component, part, object">
+        <p class="sub" style="margin:6px 0 0">Nothing is labeled automatically: every outlined object waits as a proposal. Open the
+          editor on those images and YAAP asks for each object's class, one by one.</p>
+      </div>
+      <div id="faByClass">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
+        <label class="fld" style="margin:0">Classes to find — tick the ones you want, edit the phrase if the class name isn't descriptive</label>
+        <button class="btn small ghost" id="faAll">All / none</button>
+      </div>
+      <div id="faRows">${p.classes.map(c => `
+        <div class="fa-row" data-cid="${c.id}">
+          <input type="checkbox" checked>
+          <span class="swatch" style="background:${c.color}"></span>
+          <span class="fa-name" title="${esc(c.name)}">${esc(c.name)}</span>
+          <input class="input" value="${esc(c.name)}" placeholder="phrase to find">
+        </div>`).join("")}</div>
+      </div>
+      <div class="grid2" style="margin-top:10px">
+        <div><label class="fld">Min score</label>
+          <input class="input" id="faConf" type="number" min="0.05" max="0.95" step="0.05" value="0.4"></div>
+        <div><label class="fld">Scope</label>
+          <select class="input" id="faScope"><option value="unannotated">Only images without annotations</option>
+            <option value="all">All images</option></select></div>
+        <div><label class="fld" title="Boxes on the same object are kept once: the same class overlapping by IoU 0.5 or more, or any class overlapping by at least this value. The higher score wins; a box that is already on the image always wins. 1 = keep everything.">Duplicate overlap (IoU)</label>
+          <input class="input" id="faOverlap" type="number" min="0.1" max="1" step="0.05" value="0.7"
+            title="Boxes on the same object are kept once: the same class overlapping by IoU 0.5 or more, or any class overlapping by at least this value. The higher score wins; a box that is already on the image always wins. 1 = keep everything."></div>
+      </div>
+      <div class="row" style="margin-top:16px">
+        <button class="btn primary" id="faGo">⌖ Find in dataset</button>
+        <span class="chip warn" id="faNoClass" hidden>Add a class first — or use Generic</span>
+      </div>
+    </div>`}
+    <h3 class="sect">Active learning — most informative images first</h3>
+    <div class="card">
+      <p class="sub" style="margin-top:0">Rank the images you haven't labeled by how unsure a model is about them, then switch
+        on <b>“Most uncertain first”</b> in the editor so you label what helps the next training run most.
+        Needs a model — train one first, or use a pretrained alias.</p>
+      <div class="row" style="gap:10px"><button class="btn primary" id="rkGo">Rank unlabeled images</button>
+        <span class="chip mono" id="rkState"></span></div>
+    </div>
     <h3 class="sect">Bring your own weights</h3>
     <div class="card row">
       <input type="file" id="wtFile" accept=".pt" class="input" style="flex:1">
@@ -1071,16 +1445,79 @@ async function viewAutolabel() {
     $("#alStatus").textContent = "starting… (first run may download weights)";
     $("#alPreview").innerHTML = "";
     try {
-      const imgs = await API.images(p.id);
-      const ids = $("#alScope").value === "unannotated"
-        ? imgs.filter(i => !i.annotation_count).map(i => i.id) : [];
+      const imgs = await API.images(p.id), scope = $("#alScope").value;
+      const ids = scope === "unannotated" ? imgs.filter(i => !i.annotation_count).map(i => i.id)
+        : scope === "rejected" ? imgs.filter(i => i.status === "needs_reannotation").map(i => i.id) : [];
+      if (scope !== "all" && !ids.length) {          // an empty list would mean "all images"
+        $("#alStatus").textContent = ""; btn.disabled = false;
+        return toast(scope === "rejected" ? "No rejected images." : "Every image already has annotations.");
+      }
       const job = await API.autolabel(p.id, {
         model_name: $("#alModel").value, conf: +$("#alConf").value, image_ids: ids,
         replace_existing: $("#alReplace").checked, create_missing_classes: $("#alCreate").checked,
+        max_overlap: +$("#alOverlap").value || 0.7,
       });
       $("#alStatus").textContent = "";
       watchAutolabelJob(p, job.id);
     } catch (e) { $("#alStatus").textContent = ""; btn.disabled = false; err(e); }
+  };
+  // rejected images still hold the boxes that were rejected — the new ones should replace them
+  $("#alScope").onchange = () => { if ($("#alScope").value === "rejected") $("#alReplace").checked = true; };
+  $("#faAll") && ($("#faAll").onclick = () => {
+    const boxes = $$("#faRows input[type=checkbox]");
+    const on = boxes.some(b => !b.checked);
+    boxes.forEach(b => { b.checked = on; });
+  });
+  let faMode = "classes";
+  function setFaMode(mode) {
+    faMode = mode;
+    $$("#faMode [data-mode]").forEach(x => {
+      x.classList.toggle("primary", x.dataset.mode === mode); x.classList.toggle("ghost", x.dataset.mode !== mode);
+    });
+    $("#faByClass").hidden = mode !== "classes";
+    $("#faGeneric").hidden = mode !== "generic";
+    const blocked = mode === "classes" && !p.classes.length;     // generic mode needs no classes
+    $("#faGo").disabled = blocked;
+    $("#faNoClass").hidden = !blocked;
+  }
+  if ($("#faMode")) {
+    $$("#faMode [data-mode]").forEach(b => b.onclick = () => setFaMode(b.dataset.mode));
+    setFaMode(p.classes.length ? "classes" : "generic");          // no classes yet: outline everything
+  }
+  $("#faGo") && ($("#faGo").onclick = async () => {
+    const body = { mode: faMode, conf: +$("#faConf").value, only_unannotated: $("#faScope").value === "unannotated",
+                   max_overlap: +$("#faOverlap").value || 0.7 };
+    if (faMode === "generic") {
+      body.phrases = $("#faPhrases").value.split(",").map(s => s.trim()).filter(Boolean);
+      if (!body.phrases.length) return toast("Give at least one phrase.", "err");
+    } else {
+      body.targets = $$("#faRows .fa-row").filter(r => $("input[type=checkbox]", r).checked)
+        .map(r => ({ class_id: +r.dataset.cid, text: $("input.input", r).value.trim() }));
+      if (!body.targets.length) return toast("Tick at least one class.", "err");
+      if (body.targets.some(t => !t.text)) return toast("Every ticked class needs a phrase.", "err");
+    }
+    const btn = $("#faGo"); btn.disabled = true; $("#alGo").disabled = true;
+    $("#alPreview").innerHTML = "";
+    try {
+      const job = await API.samFindAll(p.id, body);
+      watchAutolabelJob(p, job.id, faMode === "generic" ? "generic" : "find", btn);
+    } catch (e) { btn.disabled = false; $("#alGo").disabled = false; err(e); }
+  });
+  async function refreshRankState() {
+    try {
+      const s = await API.alState(p.id);
+      $("#rkState").textContent = s.scored
+        ? `${s.scored} image(s) ranked · ${s.model_name} · ${new Date(s.scored_at + "Z").toLocaleString()}` : "not ranked yet";
+    } catch (_) {}
+  }
+  refreshRankState();
+  $("#rkGo").onclick = async () => {
+    const btn = $("#rkGo"); btn.disabled = true; $("#alGo").disabled = true;
+    $("#alPreview").innerHTML = "";
+    try {
+      const job = await API.alScore(p.id, { model_name: $("#alModel").value });
+      watchAutolabelJob(p, job.id, "score", btn, refreshRankState);
+    } catch (e) { btn.disabled = false; $("#alGo").disabled = false; err(e); }
   };
   $("#wtGo").onclick = async () => {
     const f = $("#wtFile").files[0];
@@ -1089,6 +1526,145 @@ async function viewAutolabel() {
     catch (e) { err(e); }
   };
   enableFrameViewer($("#alPreview"));
+
+  /* Bootstrap: train on the labeled images → label the rest → review → next round */
+  const bsCard = $("#bsCard");
+  const bsActive = r => !!r && (r.status === "training" || r.status === "labeling");
+  let bs = null, bsGen = 0;
+  async function loadBootstrap() {
+    try { bs = await API.bootstrapState(p.id); } catch (e) { $("#bsStats").textContent = e.message; return; }
+    if (!document.body.contains(bsCard)) return;
+    if (!$("#bsModel").options.length)
+      $("#bsModel").innerHTML = bs.models.map(m => `<option ${m === bs.default_model ? "selected" : ""}>${m}</option>`).join("");
+    $("#bsEpochs").placeholder = `auto (${bs.auto_epochs})`;
+    renderBsState();
+    if (bs.last) renderBsRun(bs.last);
+    if (bsActive(bs.last)) pollBootstrap(bs.last.id);
+  }
+  function renderBsState() {
+    const refresh = $("#bsRefresh").checked, rejected = $("#bsRejected").checked, last = bs.last;
+    const targets = bs.unannotated + (refresh ? bs.unreviewed : 0) + (rejected ? bs.rejected : 0);
+    $("#bsStats").innerHTML = `
+      <span><b>${bs.labeled}</b> labeled image${bs.labeled === 1 ? "" : "s"} to learn from${bs.background ? ` + ${bs.background} empty` : ""}</span>
+      <span><b>${bs.unannotated}</b> unlabeled</span>
+      ${bs.unreviewed ? `<span><b>${bs.unreviewed}</b> with unreviewed predictions${refresh ? " — get the new model's" : " — kept"}</span>` : ""}
+      ${bs.rejected ? `<span><b>${bs.rejected}</b> rejected${rejected ? " — get the new model's" : " — kept for you to fix"}</span>` : ""}
+      ${bs.new_since_last > 0 ? `<span class="ok">+${bs.new_since_last} labeled since the last round</span>` : ""}`;
+    let hint = "", warn = false;
+    if (bs.labeled < bs.min_labeled) { hint = `Label at least ${bs.min_labeled} images first`; warn = true; }
+    else if (!targets) hint = "Nothing left to label";
+    else if (bs.labeled < bs.recommended) { hint = `Works best with ${bs.recommended}+ labeled images`; warn = true; }
+    else if (bs.few_examples?.length) {
+      hint = "Few examples of: " + bs.few_examples.map(c => `${c.name} (${c.count})`).join(", ") +
+        " — label a few more, or the model will confuse them";
+      warn = true;
+    }
+    else if (last && last.status === "done" && last.to_review > 0 && !bs.new_since_last)
+      hint = `Review round ${last.round} first — what you accept trains the next round`;
+    $("#bsHint").hidden = !hint;
+    $("#bsHint").textContent = hint;
+    $("#bsHint").className = warn ? "chip warn" : "chip";
+    $("#bsGo").disabled = bsActive(last) || bs.labeled < bs.min_labeled || !targets;
+    $("#bsGo").textContent = bs.next_round > 1 ? `⚡ Run round ${bs.next_round}` : "⚡ Bootstrap";
+  }
+  // built once per run + status; polls only update the moving parts, so the log can be
+  // scrolled and the Stop button doesn't get swapped out under the pointer
+  function renderBsRun(r) {
+    const host = $("#bsProgress"), active = bsActive(r), al = r.autolabel;
+    const pct = r.status === "training" ? r.epoch / Math.max(1, r.epochs)
+      : al ? al.processed / Math.max(1, al.total) : 0;
+    const msg = r.status === "failed" ? r.error : r.message;
+    const key = `${r.id}:${r.status}:${!!(al && al.log)}`;
+    if (host.dataset.key === key) {
+      $(".bs-msg", host).textContent = msg;
+      const bar = $(".bs-bar i", host); if (bar) bar.style.width = `${Math.round(pct * 100)}%`;
+      const lb = $(".logbox", host);
+      if (lb && al) {
+        const follow = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 30;
+        if (lb.textContent !== al.log) { lb.textContent = al.log; if (follow) lb.scrollTop = lb.scrollHeight; }
+      }
+      return;
+    }
+    host.dataset.key = key;
+    const phase = { training: "step 1/2 · training", labeling: "step 2/2 · labeling" }[r.status] || r.status;
+    host.innerHTML = `
+      <div class="row bs-head">
+        <span class="pill ${active ? "running" : r.status}">round ${r.round} · ${phase}</span>
+        <span class="mono bs-msg ${r.status === "failed" ? "wrap" : ""}" title="${esc(msg)}">${esc(msg)}</span>
+        ${active ? `<button class="btn small danger" id="bsStop">Stop</button>` : ""}
+      </div>
+      ${active ? `<span class="hl-bar bs-bar"><i style="width:${Math.round(pct * 100)}%"></i></span>` : ""}
+      ${r.status === "training" ? `<p class="sub bs-note">${esc(r.model_arch)} on ${r.train_images} labeled image(s) ·
+        full log under Train → job #${r.train_job_id}</p>` : ""}
+      ${al && al.log ? (active ? `<div class="logbox">${esc(al.log)}</div>`
+        : `<details class="bs-log"><summary>Labeling log</summary><div class="logbox">${esc(al.log)}</div></details>`) : ""}
+      ${r.status === "done" && r.to_review ? `
+        <div class="row" style="margin-top:12px;align-items:center;gap:12px">
+          <button class="btn primary" id="bsReview">Review round ${r.round} → <span class="mono">${r.to_review}</span></button>
+          <span class="sub" style="margin:0">Accept (<span class="kbd">A</span>) what's right, reject
+            (<span class="kbd">R</span>) what's wrong — accepted images train the next round.</span>
+        </div>` : ""}`;
+    const lb = $(".logbox", host);
+    if (lb && active) lb.scrollTop = lb.scrollHeight;
+    $("#bsStop") && ($("#bsStop").onclick = async () => {
+      if (!confirm(`Stop bootstrap round ${r.round}? Images it already labeled keep their predictions.`)) return;
+      try { renderBsRun(await API.stopBootstrap(p.id, r.id)); } catch (e) { err(e); }
+      loadBootstrap();
+    });
+    $("#bsReview") && ($("#bsReview").onclick = () => {
+      S.reviewOnly = r.labeled_image_ids;
+      startQuickReview(null, "review");
+    });
+  }
+  function pollBootstrap(bid) {
+    const gen = ++bsGen;            // a newer poll (or leaving the page) ends this one
+    let watched = false;
+    const tick = async () => {
+      if (gen !== bsGen || !document.body.contains(bsCard)) return;
+      let r;
+      try { r = await API.bootstrapRun(p.id, bid); } catch (_) { setTimeout(tick, 4000); return; }
+      if (gen !== bsGen || !document.body.contains(bsCard)) return;
+      if (bs) bs.last = r;
+      renderBsRun(r);
+      if (bsActive(r)) {
+        if (!watched && bs) renderBsState();   // disable ⚡ while it runs
+        watched = true; setTimeout(tick, 1500); return;
+      }
+      if (watched && r.status === "done") {
+        toast(`Bootstrap round ${r.round}: ${r.message}`, "ok", 8000);
+        refreshModelPicker();
+      } else if (watched && r.status === "failed") toast(`Bootstrap round ${r.round} failed: ${r.error}`, "err");
+      loadBootstrap();
+    };
+    tick();
+  }
+  async function refreshModelPicker() {        // the new "Bootstrap rN" weights for Run a model / Rank
+    try {
+      const m = await API.models(p.id, p.task_type), sel = $("#alModel"), keep = sel.value;
+      const have = new Set([...sel.options].map(o => o.value));
+      m.weights.filter(w => !have.has(`weight:${w.id}`)).reverse().forEach(w => {
+        sel.insertAdjacentHTML("afterbegin", `<option value="weight:${w.id}">★ ${esc(w.name)} (${w.source})</option>`);
+      });
+      sel.value = keep;
+    } catch (_) {}
+  }
+  $("#bsRefresh").onchange = $("#bsRejected").onchange = () => { if (bs) renderBsState(); };
+  $("#bsGo").onclick = async () => {
+    const btn = $("#bsGo");
+    btn.disabled = true;
+    try {
+      const r = await API.bootstrap(p.id, {
+        model_arch: $("#bsModel").value, epochs: +$("#bsEpochs").value || 0,
+        conf: +$("#bsConf").value || 0.4, refresh_unreviewed: $("#bsRefresh").checked,
+        relabel_rejected: $("#bsRejected").checked, max_overlap: +$("#bsOverlap").value || 0.7,
+      });
+      toast(`Bootstrap round ${r.round} started — training on ${r.train_images} labeled image(s).`, "ok");
+      if (bs) bs.last = r;
+      renderBsRun(r);
+      pollBootstrap(r.id);
+    } catch (e) { btn.disabled = false; err(e); }
+  };
+  loadBootstrap();
 }
 
 function renderAlProgress(job) {
@@ -1101,15 +1677,35 @@ function renderAlProgress(job) {
     <div class="logbox">${esc(job.log || "starting…")}</div>`;
 }
 
-async function watchAutolabelJob(p, jid) {
+// kind: "label" (auto-label), "find" (SAM concept search) → both end in the preview grid;
+// "score" (active-learning ranking) writes no annotations, so no grid.
+async function watchAutolabelJob(p, jid, kind = "label", btn = null, onDone = null) {
+  const done = () => { $("#alGo").disabled = false; if (btn) btn.disabled = false; if (onDone) onDone(); };
   const job = await API.autolabelJob(p.id, jid).catch(err);
-  if (!job) { $("#alGo").disabled = false; return; }
+  if (!$("#alProgress")) return;          // left the Auto-label page: stop polling
+  if (!job) { done(); return; }
   renderAlProgress(job);
-  if (job.status === "running") { setTimeout(() => watchAutolabelJob(p, jid), 1200); return; }
+  if (job.status === "running") { setTimeout(() => watchAutolabelJob(p, jid, kind, btn, onDone), 1200); return; }
 
-  $("#alGo").disabled = false;
-  if (job.status === "failed") { toast(`Auto-label failed: ${job.error}`, "err"); return; }
-  toast(`Labeled ${job.images_labeled}/${job.total} images · +${job.annotations_added} annotations`, "ok");
+  done();
+  if (job.status === "failed") { toast(`${kind === "score" ? "Ranking" : "Auto-label"} failed: ${job.error}`, "err"); return; }
+  if (kind === "generic") {
+    toast(`Outlined objects in ${job.images_labeled}/${job.total} images (${job.annotations_added} proposals).`, "ok", 8000);
+    const noClasses = !p.classes.length;
+    $("#alPreview").innerHTML = job.images_labeled
+      ? `<div class="card" style="margin-top:16px"><p class="sub" style="margin-top:0">${job.annotations_added} object(s) outlined in
+           ${job.images_labeled} image(s). They have no class yet — ${noClasses ? "add your classes, then " : ""}the editor
+           walks through them and asks for each class.</p>
+         <button class="btn primary" id="goLabel">${noClasses ? "Add classes →" : "Label the found objects →"}</button></div>`
+      : `<p class="sub" style="margin-top:16px">Nothing found — try other phrases or a lower min score.</p>`;
+    $("#goLabel") && ($("#goLabel").onclick = () => {
+      if (noClasses) return nav("classes");
+      S.annotateScope = "proposals"; nav("annotate");
+    });
+    return;
+  }
+  if (kind === "score") { toast(`Ranked ${job.images_labeled}/${job.total} images by uncertainty.`, "ok", 8000); return; }
+  toast(`${kind === "find" ? "Found objects in" : "Labeled"} ${job.images_labeled}/${job.total} images · +${job.annotations_added} annotations`, "ok", 8000);
   await renderAlPreviewGrid(p, jid);
 }
 
@@ -1335,6 +1931,44 @@ async function viewGenerate() {
 }
 
 /* ── versions ─────────────────────────────────────────────────────── */
+function healthHtml(h, task) {
+  const bar = (n, max, color = "var(--teal)") =>
+    `<span class="hl-bar"><i style="width:${max ? Math.round(100 * n / max) : 0}%;background:${color}"></i></span>`;
+  const sc = h.score >= 80 ? "var(--teal)" : h.score >= 50 ? "var(--amber)" : "var(--red)";
+  const imgTotal = h.total_images || 1;
+  const splitRows = ["train", "val", "test"].map(s => `
+    <div class="hl-row"><span>${s}</span>${bar(h.images[s], imgTotal)}
+      <span class="mono">${h.images[s]} img · ${Math.round(100 * h.images[s] / imgTotal)}%${task === "classify" ? "" : ` · ${h.empty_images[s]} empty`}</span></div>`).join("");
+  const maxCls = Math.max(1, ...h.classes.map(c => c.total));
+  const clsRows = h.classes.map(c => `
+    <div class="hl-row"><span title="${esc(c.name)}">${esc(c.name)}</span>
+      <span class="hl-stack" style="width:${Math.round(100 * c.total / maxCls)}%">
+        <i style="flex:${c.train};background:var(--teal)" title="train ${c.train}"></i>
+        <i style="flex:${c.val};background:var(--amber)" title="val ${c.val}"></i>
+        <i style="flex:${c.test};background:var(--blue)" title="test ${c.test}"></i></span>
+      <span class="mono">${c.total} <span style="color:var(--muted)">(${c.train}/${c.val}/${c.test})</span></span></div>`).join("");
+  const warn = h.warnings.map(w => `<div class="hl-warn ${w.level}">${w.level === "error" ? "✕" : w.level === "warn" ? "⚠" : "ℹ"} ${esc(w.msg)}</div>`).join("")
+    || `<div class="hl-warn ok">✓ No issues found.</div>`;
+  const maxH = Math.max(1, ...h.boxes_per_image.hist);
+  const hist = h.boxes_per_image.hist.map((n, i) =>
+    `<span class="hl-col" title="${i === 10 ? "10+" : i} per image: ${n} image(s)"><i style="height:${Math.round(100 * n / maxH)}%"></i><b>${i === 10 ? "10+" : i}</b></span>`).join("");
+  const kv = o => Object.entries(o).map(([k, v]) => `${k} <b>${v}</b>`).join(" · ") || "—";
+  return `<div class="health">
+    <div class="hl-score" style="color:${sc}">${h.score}<small>/100 health</small></div>
+    <div class="hl-warns">${warn}</div>
+    <h3 class="sect">Splits</h3>${splitRows}
+    <h3 class="sect">Labels per class <span class="sub" style="font-size:11px">(train / val / test)</span></h3>${clsRows || "—"}
+    <p class="sub">${h.labels_total} label(s)${h.imbalance_ratio ? ` · imbalance ${h.imbalance_ratio}:1` : ""}</p>
+    ${task === "classify" ? "" : `
+    <h3 class="sect">Objects per image · mean ${h.boxes_per_image.mean}, max ${h.boxes_per_image.max}</h3>
+    <div class="hl-hist">${hist}</div>
+    <h3 class="sect">Object size &amp; shape</h3>
+    <p class="sub">size: ${kv(h.box_size)}<br>shape: ${kv(h.aspect)}</p>`}
+    <h3 class="sect">Duplicates</h3>
+    <p class="sub">within a split <b>${h.duplicates.within_split}</b> · across splits (leakage) <b>${h.duplicates.cross_split}</b></p>
+  </div>`;
+}
+
 async function viewVersions() {
   const p = S.project;
   $("#stage").innerHTML = `<div class="stage-pad" style="max-width:820px">
@@ -1357,12 +1991,21 @@ async function viewVersions() {
         <span class="vname">${esc(v.name)}</span>
         <span class="pill ${v.status}">${v.status}</span>
         <span class="meta">${esc(meta)}</span>
+        ${v.status === "ready" ? `<button class="btn small" data-health="${v.id}" title="Dataset health statistics">♥ Health</button>` : ""}
         ${v.status === "ready" ? `<a class="btn small" href="${API.versionZip(p.id, v.id)}">⬇ zip</a>` : ""}
         <button class="btn ghost small" data-del="${v.id}">✕</button>
       </div>`;
     }).join("") || `<div class="empty">No versions yet — use Generate.</div>`;
     $$("[data-del]").forEach(b => b.onclick = async () => {
       try { await API.deleteVersion(p.id, +b.dataset.del); render(); } catch (e) { err(e); }
+    });
+    $$("[data-health]").forEach(b => b.onclick = async () => {
+      const v = versions.find(x => x.id === +b.dataset.health);
+      b.disabled = true;
+      try { openViewer(`Dataset health · ${v.name}`, healthHtml(await API.versionHealth(p.id, v.id), p.task_type),
+                       { hint: "computed from the exported files" }); }
+      catch (e) { err(e); }
+      b.disabled = false;
     });
   }
   await render();
@@ -1497,21 +2140,16 @@ async function viewTrain() {
 
   $("#stage").innerHTML = `<div class="stage-pad" style="max-width:820px">
     <h1 class="page">Train</h1>
-    <p class="sub">Two ways to train a model from a generated version: locally through this app, or on
-      Google's free GPUs via Colab.</p>
+    <p class="sub">Three ways to train a model from a generated version: locally through this app, on a
+      remote GPU machine over SSH, or on Google's free GPUs via Colab.</p>
 
     <div class="row" style="margin-bottom:16px" id="trainTabs">
       <button class="btn small primary" data-tab="local">🖥 Local train</button>
+      <button class="btn small ghost" data-tab="ssh"><span class="ico-white">🔌</span> SSH</button>
       <button class="btn small ghost" data-tab="colab">☁ Google Colab</button>
     </div>
 
     <div id="trainLocalPane">
-      <div class="card" style="border-color:var(--amber-dim);background:rgba(255,210,63,.06);margin-bottom:14px">
-        <b style="color:var(--amber)">⚠ Known issue</b> — local training doesn't currently complete
-        successfully. If you hit an error, open the job's <span class="mono">log</span> below (once
-        started/failed jobs appear under Jobs) so it can be diagnosed with the actual traceback — until
-        then, use the Google Colab tab instead.
-      </div>
       <div class="card">
         <div class="grid2">
           <div><label class="fld">Dataset version</label>
@@ -1550,21 +2188,60 @@ async function viewTrain() {
           ${ready.length ? "" : `<span class="chip warn">Generate a dataset version first</span>`}
         </div>
       </div>
-      <h3 class="sect">Jobs</h3>
-      <div id="jobList"></div>
-      <div class="joblog-head" id="jobLogHead">
-        <span class="mono" style="font-size:11px;color:var(--muted)" id="jobLogTitle"></span>
-        <button class="btn small" id="jobLogFull">⛶ Full screen</button>
-      </div>
-      <div class="logbox" id="jobLog" style="display:none"></div>
-      <div class="row job-plots" id="jobPlots" style="display:none">
-        <div style="flex:1;min-width:260px">
-          <p class="sub" style="margin:12px 0 4px">Results <span class="plot-hint">· click to open full screen</span></p>
-          <img id="jobPlotResults" alt="results.png" style="display:none">
+    </div>
+
+    <div id="trainSshPane" hidden>
+      <div class="card">
+        <h3 class="sect" style="margin-top:0">🔌 Remote GPU over SSH</h3>
+        <p class="sub" style="margin-bottom:6px">Trains on another machine; log, stop and results stay here.
+          Key-based auth only (no passwords) — hosts from <span class="mono">~/.ssh/config</span> work too.</p>
+        <div class="grid2">
+          <div><label class="fld">Host</label><input class="input" id="sshHost" placeholder="192.168.1.50 or ssh-config alias"></div>
+          <div><label class="fld">User</label><input class="input" id="sshUser"></div>
+          <div><label class="fld">Port</label><input class="input" id="sshPort" type="number" value="22"></div>
+          <div><label class="fld">Identity file (optional)</label><input class="input" id="sshKey" placeholder="~/.ssh/id_ed25519"></div>
+          <div><label class="fld">Remote python</label><input class="input" id="sshPython" placeholder="~/yaap-env/bin/python"></div>
+          <div><label class="fld">Remote work dir</label><input class="input" id="sshWorkdir" placeholder="~/yaap_jobs"></div>
         </div>
-        <div style="flex:1;min-width:260px">
-          <p class="sub" style="margin:12px 0 4px">Confusion matrix <span class="plot-hint">· click to open full screen</span></p>
-          <img id="jobPlotConfusion" alt="confusion_matrix.png" style="display:none">
+        <label class="fld" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="sshCleanup">
+          Delete remote job folder after download</label>
+        <div class="row" style="margin-top:10px">
+          <button class="btn small" id="sshTest">Test connection</button>
+          <span class="mono" id="sshTestResult" style="font-size:12px"></span>
+        </div>
+        <h3 class="sect">Training options</h3>
+        <div class="grid2">
+          <div><label class="fld">Dataset version</label><select class="input" id="sshVer">${verOpts}</select></div>
+          <div><label class="fld">Architecture / starting weights</label>
+            <select class="input" id="sshArch">
+              ${models.pretrained.map(m => `<option ${m === "yolo11n.pt" ? "selected" : ""}>${m}</option>`).join("")}
+              ${(models.rtdetr || []).map(m => `<option value="${m}">${m} (RT-DETR)</option>`).join("")}
+              ${models.weights.map(w => `<option value="weight:${w.id}">★ ${esc(w.name)}</option>`).join("")}
+            </select></div>
+          <div><label class="fld">Epochs</label><input class="input" id="sshEpochs" type="number" value="100"></div>
+          <div><label class="fld">Image size</label><input class="input" id="sshImgsz" type="number" value="640"></div>
+          <div><label class="fld">Batch</label><input class="input" id="sshBatch" type="number" value="16"></div>
+          <div><label class="fld">Patience</label><input class="input" id="sshPatience" type="number" value="10" min="0"></div>
+          <div><label class="fld">Device</label>
+            <select class="input" id="sshDevice"><option value="auto">auto (GPU if available)</option>
+              <option value="cpu">cpu</option><option value="cuda:0">cuda:0</option></select></div>
+        </div>
+        <details class="hp-details" id="sshHpDetails">
+          <summary>Optional hyperparameters &amp; augmentations (ultralytics <span class="mono">train()</span> settings)</summary>
+          <div class="hp-body">
+            <p class="sub" style="margin:4px 0 12px">Everything here is opt-in — leave a row untouched and
+              ultralytics uses its own default. If you already augmented this version in <b>Generate</b>,
+              turn the matching rows below off to avoid double-augmenting.</p>
+            <h3 class="sect" style="margin-top:0">Hyperparameters</h3>
+            <div class="hp-grid">${TRAIN_HYPERPARAMS.map(renderHpRow).join("")}</div>
+            <h3 class="sect">Built-in augmentation</h3>
+            <div class="hp-grid">${TRAIN_AUG_DEFS.map(renderHpRow).join("")}</div>
+          </div>
+        </details>
+
+        <div class="row" style="margin-top:16px">
+          <button class="btn primary" id="sshGo" ${ready.length ? "" : "disabled"}>▶ Start training on SSH host</button>
+          ${ready.length ? "" : `<span class="chip warn">Generate a dataset version first</span>`}
         </div>
       </div>
     </div>
@@ -1595,6 +2272,24 @@ async function viewTrain() {
           above — swap it for your own notebook code whenever you're ready to share it.</p>
       </div>
     </div>
+
+    <h3 class="sect">Jobs</h3>
+      <div id="jobList"></div>
+      <div class="joblog-head" id="jobLogHead">
+        <span class="mono" style="font-size:11px;color:var(--muted)" id="jobLogTitle"></span>
+        <button class="btn small" id="jobLogFull">⛶ Full screen</button>
+      </div>
+      <div class="logbox" id="jobLog" style="display:none"></div>
+      <div class="row job-plots" id="jobPlots" style="display:none">
+        <div style="flex:1;min-width:260px">
+          <p class="sub" style="margin:12px 0 4px">Results <span class="plot-hint">· click to open full screen</span></p>
+          <img id="jobPlotResults" alt="results.png" style="display:none">
+        </div>
+        <div style="flex:1;min-width:260px">
+          <p class="sub" style="margin:12px 0 4px">Confusion matrix <span class="plot-hint">· click to open full screen</span></p>
+          <img id="jobPlotConfusion" alt="confusion_matrix.png" style="display:none">
+        </div>
+      </div>
   </div>`;
 
   function setTrainTab(tab) {
@@ -1604,6 +2299,7 @@ async function viewTrain() {
       b.classList.toggle("ghost", !active);
     });
     $("#trainLocalPane").hidden = tab !== "local";
+    $("#trainSshPane").hidden = tab !== "ssh";
     $("#trainColabPane").hidden = tab !== "colab";
   }
   $$("#trainTabs [data-tab]").forEach(b => b.onclick = () => setTrainTab(b.dataset.tab));
@@ -1658,6 +2354,7 @@ results = model.train(
   renderColabSnippet();
 
   wireHpRows($("#trHpDetails"));
+  wireHpRows($("#sshHpDetails"));
 
   $("#trGo").onclick = async () => {
     try {
@@ -1672,6 +2369,41 @@ results = model.train(
     } catch (e) { err(e); }
   };
 
+  const sshFields = { host: "#sshHost", user: "#sshUser", identity_file: "#sshKey",
+    python: "#sshPython", workdir: "#sshWorkdir" };
+  const readSsh = () => ({
+    ...Object.fromEntries(Object.entries(sshFields).map(([k, s]) => [k, $(s).value.trim()])),
+    port: +$("#sshPort").value || 22, cleanup: $("#sshCleanup").checked });
+  API.sshSettings().then(s => {
+    Object.entries(sshFields).forEach(([k, sel]) => { $(sel).value = s[k] || ""; });
+    $("#sshPort").value = s.port; $("#sshCleanup").checked = !!s.cleanup;
+  }).catch(() => {});
+  $("#sshTest").onclick = async () => {
+    const out = $("#sshTestResult");
+    out.style.color = "var(--muted)"; out.textContent = "connecting…";
+    try {
+      const r = await API.sshTest(readSsh());
+      out.style.color = r.ok ? "var(--teal)" : "var(--red)";
+      out.textContent = r.ok
+        ? `✓ torch ${r.torch} · ultralytics ${r.ultralytics} · ` +
+          (r.cuda ? `CUDA: ${r.gpus.join(", ")}` : "⚠ CUDA not available")
+        : `✗ ${r.error}`;
+    } catch (e) { out.style.color = "var(--red)"; out.textContent = `✗ ${e.message || e}`; }
+  };
+  $("#sshGo").onclick = async () => {
+    try {
+      await API.saveSshSettings(readSsh());
+      await API.train(p.id, {
+        mode: "ssh", version_id: +$("#sshVer").value, model_arch: $("#sshArch").value,
+        epochs: +$("#sshEpochs").value, imgsz: +$("#sshImgsz").value,
+        batch: +$("#sshBatch").value, patience: +$("#sshPatience").value,
+        device: $("#sshDevice").value,
+        extra: collectTrainExtra($("#sshHpDetails")),
+      });
+      toast("SSH training started.", "ok"); renderJobs();
+    } catch (e) { err(e); }
+  };
+
   let watching = null, plotsKey = null;
   async function renderJobs() {
     let jobs = [];
@@ -1680,7 +2412,8 @@ results = model.train(
       <div class="v-row">
         <span class="vname mono">#${j.id}</span>
         <span class="pill ${j.status}">${j.status}</span>
-        <span class="meta">${esc(j.model_arch)} · version ${j.version_id}</span>
+        <span class="meta">${esc(j.model_arch)} · ${j.bootstrap_round ? `bootstrap round ${j.bootstrap_round}` : `version ${j.version_id}`}</span>
+        ${j.ssh_host ? `<span class="pill ssh-host" title="Trained over SSH">🔌 ${esc(j.ssh_host)}</span>` : ""}
         <button class="btn small" data-log="${j.id}">log</button>
         ${j.status === "running" ? `<button class="btn small danger" data-stop="${j.id}">stop</button>` : ""}
         <button class="btn ghost small" data-deljob="${j.id}" title="Delete job">✕</button>
@@ -1692,8 +2425,11 @@ results = model.train(
     $$("[data-deljob]").forEach(b => b.onclick = async () => {
       const jid = +b.dataset.deljob;
       if (!confirm(`Delete job #${jid}? This also deletes its training data on disk — weights, log, results.png, confusion_matrix.png — permanently.`)) return;
+      const job = jobs.find(x => x.id === jid);
+      const remote = !!(job && job.ssh_host) &&
+        confirm(`Also delete job #${jid}'s folder on ${job.ssh_host}?`);
       try {
-        await API.deleteJob(p.id, jid);
+        await API.deleteJob(p.id, jid, remote);
         if (watching === jid) {
           watching = null;
           $("#jobLog").style.display = "none";

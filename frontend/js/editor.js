@@ -120,6 +120,12 @@ class Editor {
     if (e.button !== 0) return;
 
     if (this.tool === "sam") {
+      if ((e.ctrlKey || e.metaKey) && this.samPending.length > 1) {   // ctrl-click: exclude / re-include one match
+        const hit = [...this.samPending].reverse().find(r => pointInPoly(ix, iy, r.polygon));
+        if (hit) { hit.off = !hit.off; this.opts.onSamToggle && this.opts.onSamToggle(this); this.draw(); }
+        this.mouse.down = false;
+        return;
+      }
       this._samDown = { sx, sy, ix, iy, neg: e.shiftKey };
       this.samBox = null;
       return;
@@ -253,6 +259,7 @@ class Editor {
     else if (k === "p") this.opts.onToolKey("polygon");
     else if (k === "h") this.opts.onToolKey("pan");
     else if (k === "s") this.opts.onToolKey("sam");
+    else if (k === "e" && this.tool === "sam") this.opts.onSamFindAll && this.opts.onSamFindAll();
     else if (k === "f") this.fit();
     else if (e.code === "Space") { this.spaceHeld = true; e.preventDefault(); }
     else if (k === "enter" && this.poly) this._closePoly();
@@ -518,16 +525,21 @@ class Editor {
       ctx.beginPath();
       pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
       ctx.closePath();
-      ctx.fillStyle = "rgba(34,211,199,.22)"; ctx.fill();
-      ctx.setLineDash([6, 4]); ctx.strokeStyle = "#22D3C7"; ctx.lineWidth = 2; ctx.stroke();
-      ctx.setLineDash([]);
+      const walking = this.samPending.some(q => q.cur);        // class-by-class labeling of a "find all" result
+      const col = r.cur ? "#FFD23F" : r.color || (r.off ? "#F0555C" : "#22D3C7");
+      ctx.globalAlpha = walking && !r.cur ? (r.color ? 0.9 : 0.4) : 1;
+      ctx.fillStyle = r.cur ? "rgba(255,210,63,.30)" : r.color ? `${r.color}40` : r.off ? "rgba(240,85,92,.06)" : "rgba(34,211,199,.22)"; ctx.fill();
+      if (r.cur) { ctx.shadowColor = "#FFD23F"; ctx.shadowBlur = 14; }
+      ctx.setLineDash(r.color && !r.cur ? [] : [6, 4]); ctx.strokeStyle = col; ctx.lineWidth = r.cur ? 4 : 2; ctx.stroke();
+      ctx.shadowBlur = 0; ctx.setLineDash([]);
       if (r.label || r.score < 1) {
         const [tx, ty] = pts[0];
         ctx.font = "10px 'IBM Plex Mono', monospace";
         const t = `${r.label || "mask"} ${Math.round(r.score * 100)}%`;
-        ctx.fillStyle = "#22D3C7"; ctx.fillRect(tx, ty - 15, ctx.measureText(t).width + 8, 14);
+        ctx.fillStyle = col; ctx.fillRect(tx, ty - 15, ctx.measureText(t).width + 8, 14);
         ctx.fillStyle = "#06231d"; ctx.fillText(t, tx + 4, ty - 4);
       }
+      ctx.globalAlpha = 1;
     }
     // prompt box
     if (this.samBox) {
@@ -559,4 +571,14 @@ class Editor {
     ctx.moveTo(0, this.mouse.y); ctx.lineTo(r.width, this.mouse.y);
     ctx.stroke(); ctx.setLineDash([]);
   }
+}
+
+// ray-casting point-in-polygon, polygon = [[x,y],..] in image coords
+function pointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
 }
