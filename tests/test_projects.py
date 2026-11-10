@@ -118,3 +118,105 @@ def test_project_list_counts_and_constant_query_count(client):
         client.post(f"/api/projects/{pid}/images", files=files)
     n_after, _ = count_queries()
     assert n_after == n_before
+
+
+def test_labeled_count_means_checked_by_a_person(client):
+    """Model output nobody has reviewed and rejected images are not "labeled"."""
+    from backend.db import ImageAsset, SessionLocal
+    pid = client.post("/api/projects", json={"name": "P"}).json()["id"]
+    statuses = ["annotated", "approved", "empty", "auto-annotated", "review", "needs_reannotation", "unannotated"]
+    files = [("files", (f"{s}.png", make_png_bytes(), "image/png")) for s in statuses]
+    ids = [im["id"] for im in client.post(f"/api/projects/{pid}/images", files=files).json()["created"]]
+    db = SessionLocal()
+    for iid, s in zip(ids, statuses):
+        db.get(ImageAsset, iid).status = s
+    db.commit()
+    db.close()
+    p = client.get(f"/api/projects/{pid}").json()
+    assert (p["image_count"], p["annotated_count"], p["predicted_count"]) == (7, 3, 2)
+
+
+def _fake_worker(job_id):
+    """A harmless process whose command line looks like the training worker's."""
+    import subprocess
+    return subprocess.Popen(["sh", "-c", "sleep 60; true", "backend.services.train_worker", "--job", str(job_id)],
+                            start_new_session=True)
+
+
+def test_deleting_a_project_removes_everything_it_owns(client):
+    from backend.config import MODELS_DIR, RUNS_DIR
+    from backend.db import AutolabelJob, BootstrapRun, ModelWeight, SessionLocal, TrainJob
+
+    def project_with_stuff(name):
+        pid = client.post("/api/projects", json={"name": name}).json()["id"]
+        files = [("files", ("a.png", make_png_bytes(), "image/png"))]
+        client.post(f"/api/projects/{pid}/images", files=files)
+        db = SessionLocal()
+        job = TrainJob(project_id=pid, version_id=0, model_arch="yolo11n.pt", status="done")
+        db.add(job)
+        db.commit()
+        run = RUNS_DIR / f"job_{job.id}"
+        (run / "weights").mkdir(parents=True)
+        (run / "weights" / "best.pt").write_bytes(b"w")
+        log = RUNS_DIR / f"job_{job.id}.log"
+        log.write_text("log")
+        job.weights_path, job.log_path = str(run / "weights" / "best.pt"), str(log)
+        upload = MODELS_DIR / f"{name}_upload.pt"
+        upload.write_bytes(b"w")
+        db.add_all([ModelWeight(project_id=pid, name="trained", path=job.weights_path, source="trained"),
+                    ModelWeight(project_id=pid, name="uploaded", path=str(upload), source="uploaded"),
+                    AutolabelJob(project_id=pid, model_name="m", status="done"),
+                    BootstrapRun(project_id=pid, status="done")])
+        db.commit()
+        db.close()
+        return pid, run, log, upload
+
+    pid, run, log, upload = project_with_stuff("gone")
+    keep_pid, keep_run, keep_log, keep_upload = project_with_stuff("kept")
+    assert client.delete(f"/api/projects/{pid}").json() == {"ok": True}
+
+    assert not run.exists() and not log.exists() and not upload.exists()
+    db = SessionLocal()
+    for table in (TrainJob, ModelWeight, AutolabelJob, BootstrapRun):
+        assert db.query(table).filter_by(project_id=pid).count() == 0
+        assert db.query(table).filter_by(project_id=keep_pid).count() >= 1
+    db.close()
+    assert keep_run.exists() and keep_log.exists() and keep_upload.exists()
+    keep_upload.unlink()
+
+
+def test_deleting_a_project_stops_its_running_training(client):
+    import signal
+    from backend.db import SessionLocal, TrainJob
+    pid = client.post("/api/projects", json={"name": "P"}).json()["id"]
+    db = SessionLocal()
+    job = TrainJob(project_id=pid, version_id=0, model_arch="yolo11n.pt", status="running")
+    db.add(job)
+    db.commit()
+    proc = _fake_worker(job.id)
+    job.pid = proc.pid
+    db.commit()
+    db.close()
+    try:
+        client.delete(f"/api/projects/{pid}")
+        assert proc.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_deleting_a_project_keeps_a_weight_file_another_project_uses(client):
+    from backend.config import MODELS_DIR
+    from backend.db import ModelWeight, SessionLocal
+    a = client.post("/api/projects", json={"name": "A"}).json()["id"]
+    b = client.post("/api/projects", json={"name": "B"}).json()["id"]
+    shared = MODELS_DIR / "shared.pt"
+    shared.write_bytes(b"w")
+    db = SessionLocal()
+    db.add_all([ModelWeight(project_id=a, name="w", path=str(shared)),
+                ModelWeight(project_id=b, name="w", path=str(shared))])
+    db.commit()
+    db.close()
+    client.delete(f"/api/projects/{a}")
+    assert shared.exists()
+    shared.unlink()

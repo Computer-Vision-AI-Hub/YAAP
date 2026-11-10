@@ -105,10 +105,28 @@ def resolve_weights(model_name: str, db=None) -> str:
         return w.path
     if model_name not in KNOWN_ALIASES:
         raise InferenceError(f"Unknown model '{model_name}' — pick a listed model or upload weights.")
-    # keep ultralytics' auto-download inside our data dir
+    use_models_dir()
+    return alias_path(model_name)
+
+
+def alias_path(name: str) -> str:
+    """A pretrained alias → its file in MODELS_DIR: used as-is when preloaded (PRELOAD_MODELS / start.sh put
+    it there), otherwise ultralytics downloads it to exactly that path. A bare alias would be looked up in
+    the working directory only and re-downloaded there (lost on every rebuild; fails offline)."""
+    return str(MODELS_DIR / name) if name in KNOWN_ALIASES else name
+
+
+def use_models_dir():
+    """Keep ultralytics' settings in MODELS_DIR and let it find preloaded helper weights there too
+    (e.g. the yolo26n.pt its AMP check loads by bare name)."""
     import os
     os.environ.setdefault("YOLO_CONFIG_DIR", str(MODELS_DIR))
-    return model_name
+    try:
+        from ultralytics.utils import SETTINGS
+        if Path(str(SETTINGS.get("weights_dir", ""))).resolve() != MODELS_DIR.resolve():
+            SETTINGS.update(weights_dir=str(MODELS_DIR))
+    except Exception:          # no ultralytics / read-only settings file: lookups just stay as they were
+        pass
 
 
 # ── prediction → YAAP annotation dicts ───────────────────────────────
@@ -137,9 +155,9 @@ def predict(model_name: str, image_path: str, task: str, conf: float, iou: float
 
     if task == "segment" and r.masks is not None:
         for poly, box in zip(r.masks.xy, r.boxes):
-            pts = [[float(x), float(y)] for x, y in poly.tolist()]
-            if len(pts) < 3:
+            if len(poly) < 3:
                 continue
+            pts = simplify_polygon(poly.tolist())
             out.append({"class_name": names[int(box.cls)], "kind": "polygon",
                         "data": {"points": pts}, "confidence": float(box.conf)})
         return out
@@ -154,10 +172,56 @@ def predict(model_name: str, image_path: str, task: str, conf: float, iou: float
     return out
 
 
+def simplify_polygon(points, simplify: float = 0.008) -> list[list[float]]:
+    """A mask outline (often hundreds of points) → an editable polygon, the same way SAM's
+    outlines are simplified (Douglas-Peucker, tolerance = simplify × perimeter)."""
+    import cv2
+    import numpy as np
+    c = np.asarray(points, dtype=np.float32).reshape(-1, 1, 2)
+    approx = cv2.approxPolyDP(c, max(1.0, simplify * cv2.arcLength(c, True)), True).reshape(-1, 2)
+    pts = approx if len(approx) >= 3 else c.reshape(-1, 2)
+    return [[float(x), float(y)] for x, y in pts]
+
+
+UNCERTAINTY_MIN_CONF = 0.25
+
+
+def detection_uncertainty(confidences: list[float]) -> float:
+    """Per-image uncertainty for detect/segment: 1 − the mean confidence of the image's detections
+    (those ≥ 0.25 — below that is background noise). Nothing detected scores 0.5 — the model neither
+    claims nor rules anything out.
+    The earlier rule (the single most ambiguous detection decides) saturated on busy images: with 40+
+    objects one detection is always near 0.5, so 62 % of VisDrone images scored ≥ 0.95 and the ranking
+    didn't correlate with how wrong the model was (Spearman +0.12 vs per-image F1); the mean gives −0.64."""
+    cs = [c for c in confidences if c >= UNCERTAINTY_MIN_CONF]
+    if not cs:
+        return 0.5
+    return 1.0 - sum(cs) / len(cs)
+
+
+def uncertainty(model_name: str, image_path: str, task: str, device: str, db=None) -> float:
+    """0 (model is sure) … 1 (model is torn) for one image — used to rank unlabeled
+    images for annotation. Detection runs at a very low conf so borderline
+    objects are visible; classify uses normalized entropy of the class probabilities."""
+    if task == "classify":
+        import math
+        device = resolve_device(device)
+        loader = _load_yolo
+        r = loader(resolve_weights(model_name, db)).predict(
+            source=image_path, device=device, verbose=False)[0]
+        if r.probs is None:
+            raise InferenceError("This model does not output classification probs — pick a *-cls model.")
+        pr = [float(v) for v in r.probs.data.tolist()]
+        h = -sum(v * math.log(v) for v in pr if v > 0)
+        return h / math.log(len(pr)) if len(pr) > 1 else 0.0
+    preds = predict(model_name, image_path, task, 0.05, 0.5, device, db)
+    return detection_uncertainty([p["confidence"] for p in preds])
+
+
 def _predict_rfdetr(variant: str, image_path: str, conf: float) -> list[dict]:
-    from PIL import Image
+    from PIL import Image, ImageOps
     model, names = _load_rfdetr(variant)
-    im = Image.open(image_path).convert("RGB")
+    im = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")   # same frame as YOLO/SAM (cv2)
     det = model.predict(im, threshold=conf)
     out = []
     for (x1, y1, x2, y2), cid, score in zip(det.xyxy.tolist(), det.class_id.tolist(), det.confidence.tolist()):

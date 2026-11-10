@@ -18,6 +18,9 @@ test(async t => {
     ["GET", /\/train\/\d+\/log/, url => { logRequests.push(url);
       return { status, log: Array.from({ length: 300 }, (_, i) => `line ${i}`).join("\n") }; }],
     ["GET", /\/train$/, () => [{ id: 7, status, model_arch: "yolo11n.pt", version_id: 1 }]],
+    ["GET", /\/api\/training\/ssh\/settings$/, () => ({ host: "", user: "", port: 22, identity_file: "",
+      python: "~/yaap-env/bin/python", workdir: "~/yaap_jobs", cleanup: false })],
+    ["GET", /\/images$/, () => []],
   ] });
 
   // count plot reloads by watching the two plot <img> src setters

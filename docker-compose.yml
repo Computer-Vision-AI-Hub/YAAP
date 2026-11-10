@@ -27,8 +27,9 @@ services:
     restart: unless-stopped
     shm_size: "8gb"               # DataLoader workers need shared memory
     environment:
-      # Download these once at first start, then the container can run air-gapped.
-      PRELOAD_MODELS: "sam3.pt yolo11n.pt"
+      # Download these once at first start, then the container can run air-gapped
+      # (yolo26n.pt is what ultralytics' AMP check loads before every GPU training).
+      PRELOAD_MODELS: "sam3.pt yolo11n.pt yolo26n.pt"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"   # less GPU memory fragmentation
     deploy:
       resources:

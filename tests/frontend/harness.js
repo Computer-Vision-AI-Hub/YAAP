@@ -30,7 +30,7 @@
     const calls = [];
     const defaults = [
       ["GET", /\/api\/system\/device$/, () => ({ torch: null, cuda: false, devices: [], message: "" })],
-      ["POST", /\/api\/system\/(here|leaving)$/, () => ({ ok: true })],
+      ["POST", /\/api\/system\/(here|leaving)(\?.*)?$/, () => ({ ok: true })],
     ];
     window.fetch = async (url, opts = {}) => {
       const method = (opts.method || "GET").toUpperCase();
@@ -40,6 +40,8 @@
       for (const [m, re, handler] of [...routes, ...defaults]) {
         if (m === method && re.test(url)) {
           const out = await handler(url, body, opts);
+          // a handler can answer an error: return { __status: 409, detail: "…" }
+          if (out && out.__status) return { ok: out.__status < 400, status: out.__status, statusText: "error", json: async () => out };
           return { ok: true, status: 200, json: async () => out };
         }
       }
@@ -62,7 +64,10 @@
     const calls = installMockApi(routes);
     if (hash) history.replaceState(null, "", hash);
     for (const src of ["/static/js/api.js", "/static/js/editor.js", "/static/js/app.js"]) await loadScript(src);
-    API.imageUrl = () => PNG_1PX;
+    // the editor clips boxes to the image, so the "file" must be as big as the test images claim (100×100)
+    const c = document.createElement("canvas"); c.width = c.height = 100;
+    const PNG_100 = c.toDataURL("image/png");
+    API.imageUrl = () => PNG_100;
     API.thumbUrl = () => PNG_1PX;
     if (API.jobPlotUrl) API.jobPlotUrl = () => PNG_1PX;
     document.dispatchEvent(new Event("DOMContentLoaded", { bubbles: true }));

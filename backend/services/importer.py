@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from ..db import Annotation, ImageAsset, LabelClass, Project
+from ..db import Annotation, ImageAsset, LabelClass, Project, next_class_index
 from . import storage
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
@@ -25,7 +25,8 @@ def _get_or_create_class(db, project: Project, by_name: dict, name: str, palette
     cls = by_name.get(name)
     if cls is None:
         cls = LabelClass(project_id=project.id, name=name,
-                         color=palette[len(by_name) % len(palette)], order_idx=len(by_name))
+                         color=palette[len(by_name) % len(palette)],
+                         order_idx=next_class_index(db, project.id))
         db.add(cls); db.flush()
         by_name[name] = cls
     return cls
@@ -54,7 +55,7 @@ def import_zip(db, project: Project, raw: bytes, palette: list[str], default_spl
       classify       — <split?>/<class_name>/*.jpg
       plain images   — any zip of just images, imported unannotated.
     """
-    zf = zipfile.ZipFile(io.BytesIO(raw))
+    zf = zipfile.ZipFile(raw if hasattr(raw, "read") else io.BytesIO(raw))     # a file object or bytes
     names = [n for n in zf.namelist() if not n.endswith("/")]
     if not names:
         raise ValueError("Zip is empty.")
@@ -69,10 +70,14 @@ def import_zip(db, project: Project, raw: bytes, palette: list[str], default_spl
     img_entries = [n for n in names if Path(n).suffix.lower() in IMG_EXT]
     if not img_entries:
         raise ValueError("No images found in the zip.")
-    label_by_stem = {Path(n).stem: n for n in names
-                     if Path(n).suffix.lower() == ".txt" and Path(n).name not in ("classes.txt", "labels.txt")}
+    label_files = {n for n in names
+                   if Path(n).suffix.lower() == ".txt" and Path(n).name not in ("classes.txt", "labels.txt")}
+    labels_by_stem: dict[str, list[str]] = {}
+    for n in label_files:
+        labels_by_stem.setdefault(Path(n).stem, []).append(n)
 
     created, skipped = 0, 0
+    bad_lines: list[str] = []
     for n in img_entries:
         parts_lower = [p.lower() for p in Path(n).parts]
         split = next((SPLIT_ALIASES[p] for p in parts_lower if p in SPLIT_ALIASES), default_split)
@@ -90,17 +95,25 @@ def import_zip(db, project: Project, raw: bytes, palette: list[str], default_spl
             db.add(Annotation(image_id=im.id, class_id=cls.id, kind="classification", data="{}"))
             im.status = "annotated"
         else:
-            lbl = label_by_stem.get(Path(n).stem)
+            lbl = _label_for(n, label_files, labels_by_stem)
             n_anns = 0
             if lbl:
-                for line in zf.read(lbl).decode("utf-8", "ignore").splitlines():
+                for ln, line in enumerate(zf.read(lbl).decode("utf-8", "ignore").splitlines(), 1):
                     fields = line.split()
-                    if len(fields) < 5:
+                    if not fields:
                         continue
-                    ci = int(fields[0])
+                    try:                  # a malformed line is skipped (and reported), not fatal
+                        if len(fields) < 5:
+                            raise ValueError("fewer than 5 values")
+                        ci = int(fields[0])
+                        vals = list(map(float, fields[1:]))
+                        if ci < 0:
+                            raise ValueError("negative class index")
+                    except ValueError as e:
+                        bad_lines.append(f"{lbl}:{ln}: {e}")
+                        continue
                     cname = class_names[ci] if class_names and ci < len(class_names) else f"class{ci}"
                     cls = _get_or_create_class(db, project, by_name, cname, palette)
-                    vals = list(map(float, fields[1:]))
                     # Boxes and polygons are converted to whichever one the
                     # project's task uses (e.g. a segmentation export into a
                     # detect project keeps each polygon's bounding box).
@@ -125,7 +138,37 @@ def import_zip(db, project: Project, raw: bytes, palette: list[str], default_spl
         created += 1
         db.commit()
 
-    return {"images_created": created, "images_skipped": skipped, "classes": list(by_name.keys())}
+    return {"images_created": created, "images_skipped": skipped, "classes": list(by_name.keys()),
+            "label_lines_skipped": len(bad_lines), "label_line_errors": bad_lines[:20]}
+
+
+def _label_for(img: str, label_files: set[str], labels_by_stem: dict[str, list[str]]) -> str | None:
+    """The label file of an image entry: the same path with images/ → labels/ first, then a .txt next to
+    the image, then a file with the same stem (if several splits have one, the one sharing the most
+    folders with the image). Matching by stem alone gave train/x.jpg the labels of valid/x.txt."""
+    p = Path(img)
+    parts = list(p.parts)
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i].lower() == "images":
+            cand = Path(*parts[:i], "labels", *parts[i + 1:]).with_suffix(".txt").as_posix()
+            if cand in label_files:
+                return cand
+            break
+    cand = p.with_suffix(".txt").as_posix()
+    if cand in label_files:
+        return cand
+    options = labels_by_stem.get(p.stem, [])
+    if len(options) <= 1:
+        return options[0] if options else None
+
+    def shared(lbl: str) -> int:
+        n = 0
+        for a, b in zip(Path(lbl).parts, parts):
+            if a != b:
+                break
+            n += 1
+        return n
+    return max(options, key=shared)
 
 
 def merge_project(db, target: Project, source: Project, palette: list[str], default_split: str = "") -> dict:
@@ -159,7 +202,7 @@ def merge_project(db, target: Project, source: Project, palette: list[str], defa
                 continue
             cls = _get_or_create_class(db, target, by_name, cname, palette)
             db.add(Annotation(image_id=new_im.id, class_id=cls.id, kind=a.kind,
-                              data=a.data, source=a.source, confidence=a.confidence))
+                              data=a.data, source=a.source, confidence=a.confidence, origin=a.origin or ""))
         created += 1
         db.commit()
 

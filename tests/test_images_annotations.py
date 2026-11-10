@@ -91,6 +91,11 @@ def test_replace_annotations_rejects_unknown_class(client):
     files = [("files", ("a.png", make_png_bytes(), "image/png"))]
     iid = client.post(f"/api/projects/{pid}/images", files=files).json()["created"][0]["id"]
 
-    payload = {"annotations": [{"class_id": 999, "kind": "bbox", "data": {}}]}
+    # a box of a class deleted meanwhile is dropped, the rest is saved (one stale box used to block every save)
+    cid = client.post(f"/api/projects/{pid}/classes", json={"name": "car"}).json()["id"]
+    box = {"x": 1, "y": 1, "w": 5, "h": 5}
+    payload = {"annotations": [{"class_id": 999, "kind": "bbox", "data": box},
+                               {"class_id": cid, "kind": "bbox", "data": box}]}
     r = client.put(f"/api/projects/{pid}/images/{iid}/annotations", json=payload)
-    assert r.status_code == 400
+    assert r.status_code == 200 and r.json()["dropped_unknown_class"] == 1
+    assert [a["class_id"] for a in r.json()["annotations"]] == [cid]

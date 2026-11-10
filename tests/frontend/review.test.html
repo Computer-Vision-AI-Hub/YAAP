@@ -15,11 +15,12 @@ test(async t => {
     { id: 4, filename: "d.png", status: "approved" },
   ].map(x => ({ width: 100, height: 100, annotation_count: 1, split: "", ...x }));
   const patches = [];
+  let annDelay = 0;
   await t.boot({ routes: [
     ["GET", /\/api\/projects$/, () => []],
     ["GET", /\/api\/projects\/1$/, () => PROJECT],
     ["GET", /\/images$/, () => IMAGES.map(x => ({ ...x }))],
-    ["GET", /\/images\/\d+\/annotations$/, () => []],
+    ["GET", /\/images\/\d+\/annotations$/, async () => { if (annDelay) await t.sleep(annDelay); return []; }],
     ["PATCH", /\/images\/(\d+)$/, (url, body) => {
       const id = +url.match(/images\/(\d+)$/)[1];
       patches.push({ id, status: body.status });
@@ -60,6 +61,17 @@ test(async t => {
   t.check("Quick Review Reject sets needs_reannotation",
     patches.at(-1)?.status === "needs_reannotation", patches.at(-1));
 
+  // ── a second R while the next image is still loading doesn't reject that unseen image (annotator-12)
+  IMAGES.forEach(x => { if (x.id !== 4) x.status = "annotated"; });
+  startQuickReview(null, "review"); await t.sleep(200);
+  const before = patches.length;
+  annDelay = 300;
+  document.querySelector("#qrReject").click(); await t.sleep(60);
+  document.querySelector("#qrReject").click(); await t.sleep(500);
+  annDelay = 0;
+  t.check("double R rejects only the image on screen", patches.length - before === 1, patches.slice(before));
+  IMAGES.forEach((x, i) => { x.status = ["annotated", "needs_reannotation", "review", "approved"][i]; });
+
   // ── clicking an image under "To review" / "Approved" opens Quick Review at
   //    that image, not the editor (those images are already annotated)
   const qrShows = name => document.querySelector("#stage .sub")?.textContent.includes(name);
@@ -76,5 +88,13 @@ test(async t => {
   await t.go("#/p/1/review");
   document.querySelector(".qc-tile img").click(); await t.sleep(200);
   t.check("Needs re-annotation tile still opens the editor", location.hash.endsWith("/annotate"), location.hash);
+
+  // ── leaving Quick Review: the Exit button and Esc both return to the project Home
+  startQuickReview(null, "review"); await t.sleep(200);
+  document.querySelector("#qrExit").click(); await t.sleep(150);
+  t.check("Quick Review Exit returns to project Home", location.hash === "#/p/1/review", location.hash);
+  startQuickReview(null, "review"); await t.sleep(200);
+  document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await t.sleep(150);
+  t.check("Esc leaves Quick Review too", location.hash === "#/p/1/review", location.hash);
 });
 </script>

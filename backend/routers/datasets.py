@@ -5,11 +5,12 @@ import zipfile
 import cv2
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
 from ..db import DatasetVersion, ImageAsset, SessionLocal, get_db
 from ..schemas import AugmentPreviewRequest, MergeRequest, VersionCreate
-from ..services import augmenter, exporter, importer, storage
+from ..services import augmenter, exporter, health, importer, storage
 from .images import _img
 from .projects import PALETTE, project_or_404
 
@@ -54,20 +55,22 @@ def export_raw(pid: int, approved_only: bool = False, db: Session = Depends(get_
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     fname = f"YAAP_{p.name.replace(' ', '_')}_raw.zip"
-    return FileResponse(zip_path, filename=fname, media_type="application/zip")
+    return FileResponse(zip_path, filename=fname, media_type="application/zip",
+                        background=BackgroundTask(exporter.remove_export, zip_path))
 
 
 @router.post("/import")
-async def import_dataset(pid: int, file: UploadFile, default_split: str = "", db: Session = Depends(get_db)):
+# a plain def: FastAPI runs it in a worker thread — as async def, its long synchronous work froze the whole
+# server (every other request waited until it finished: 12.6 s for a 500-image import)
+def import_dataset(pid: int, file: UploadFile, default_split: str = "", db: Session = Depends(get_db)):
     """Load an external dataset zip into this project — YOLO detect/segment
     layout (data.yaml/classes.txt + images/labels), a classify folder-per-class
     layout, or a plain zip of images (imported unannotated)."""
     p = project_or_404(db, pid)
     if not (file.filename or "").endswith(".zip"):
         raise HTTPException(400, "Expected a .zip file")
-    raw = await file.read()
-    try:
-        res = importer.import_zip(db, p, raw, PALETTE, default_split)
+    try:      # the upload is already a temporary file on disk — read the zip from there, not into memory
+        res = importer.import_zip(db, p, file.file, PALETTE, default_split)
     except zipfile.BadZipFile:
         raise HTTPException(400, "Not a valid zip file")
     except ValueError as e:
@@ -133,6 +136,25 @@ def download_version(pid: int, vid: int, db: Session = Depends(get_db)):
     p = project_or_404(db, pid)
     fname = f"YAAP_{p.name.replace(' ', '_')}_{v.name}.zip"
     return FileResponse(zip_path, filename=fname, media_type="application/zip")
+
+
+@router.get("/versions/{vid}/health")
+def version_health(pid: int, vid: int, refresh: bool = False, db: Session = Depends(get_db)):
+    """Label/split/class statistics for a version, cached in its stats JSON."""
+    v = db.get(DatasetVersion, vid)
+    if not v or v.project_id != pid:
+        raise HTTPException(404, "Version not found")
+    if v.status != "ready":
+        raise HTTPException(400, f"Version is '{v.status}' — wait until it is ready.")
+    stats = json.loads(v.stats or "{}")
+    if refresh or "health" not in stats:
+        vdir = exporter.version_dir(pid, vid)
+        if not vdir.is_dir():
+            raise HTTPException(404, "Version files are missing on disk")
+        stats["health"] = health.compute(vdir, project_or_404(db, pid).task_type)
+        v.stats = json.dumps(stats)
+        db.commit()
+    return stats["health"]
 
 
 @router.delete("/versions/{vid}")

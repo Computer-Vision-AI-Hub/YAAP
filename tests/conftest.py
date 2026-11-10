@@ -25,6 +25,8 @@ def _clean_db():
     Base.metadata.create_all(engine)
     shutil.rmtree(PROJECTS_DIR, ignore_errors=True)
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    from backend.services import jobs
+    jobs.cancel_leave()                 # no idle-shutdown state leaks between tests
     yield
 
 

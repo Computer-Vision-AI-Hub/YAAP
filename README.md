@@ -48,13 +48,15 @@ architectures.
 | Area | What you get |
 |---|---|
 | Tasks | Object detection (boxes), instance segmentation (polygons), classification |
-| Editor | Canvas with SAM assist, box + polygon tools, vertex editing, class hotkeys `1-9`, autosave, crosshair guides |
-| SAM | SAM 3 point / box prompts, mask→polygon simplification, task-aware conversion, per-mask class picker |
+| Editor | Canvas with SAM assist, box + polygon tools, vertex editing, class hotkeys `1-9`, `0`, autosave, crosshair guides |
+| SAM | SAM 3 point / box prompts, mask→polygon simplification, task-aware conversion, per-mask class picker. **Find all like this** (`E`): every similar object in the image, labeled one by one in a walkthrough. **Find all by concept**: text phrases per class over the whole dataset, or a generic "outline everything, label later" mode |
+| Bootstrap | Label ~10 images, click once: YAAP trains a small YOLO model on them (~1 min on a GPU) and pre-labels the rest; review, then run the next round |
+| Active learning | Rank unlabeled images by model uncertainty and annotate the most informative first |
 | Auto-label | Batch inference with any ultralytics model — YOLOv8 / YOLO11 / YOLO26, `-seg`, `-cls`, RT-DETR, your uploaded or YAAP-trained `.pt`. Predictions land as editable annotations flagged *for review* |
 | Augmentation | albumentations pipeline: flips, rotate, shear, brightness/contrast, hue/sat, blur, noise, CLAHE, cutout, grayscale — with live preview, applied to the train split only |
-| Versions | Frozen dataset snapshots: split ratios, preprocessing (resize / stretch / letterbox / grayscale), augmentation multiplier, choice of export format, zip download |
+| Versions | Frozen dataset snapshots: split ratios, preprocessing (resize / stretch / letterbox / grayscale), augmentation multiplier, choice of export format, zip download, and a **health report** (labels per class and split, imbalance, object sizes, duplicates and train/val leakage) |
 | Export | **YOLO** — detect txt, YOLO-seg polygon txt, or classification folders, with `data.yaml`, directly consumable by `yolo train` / the ultralytics Python API. **COCO** — `_annotations.coco.json` per split (Roboflow-style layout) / HuggingFace `transformers` / detectron2 / pycocotools. Detect and segment projects can pick either; classify is YOLO-folder only |
-| Training | Launch ultralytics training jobs from the UI (subprocess, live log, stop button) for YOLO or RT-DETR. Best weights feed back into auto-labeling. A separate Google Colab tab gives a copyable notebook template for training elsewhere |
+| Training | Launch ultralytics training jobs from the UI (subprocess, live log, stop button) for YOLO or RT-DETR — locally or **on another GPU machine over SSH** (key auth, same live log and stop). Best weights feed back into auto-labeling. A separate Google Colab tab gives a copyable notebook template for training elsewhere |
 | GPU | PyTorch with CUDA — device is auto-detected and shown in the top bar; SAM, auto-label and training all use it |
 
 ## Quick start — Docker (recommended)
@@ -73,7 +75,7 @@ Then choose:
 2) Open **http://127.0.0.1:8811**. All state persists in `./data` on the host.
 
 On first start the container pre-downloads the weights listed in the
-`PRELOAD_MODELS` env (default: `sam3.pt yolo11n.pt`) into
+`PRELOAD_MODELS` env (default: `sam3.pt yolo11n.pt yolo26n.pt`) into
 `./data/models` — after that it runs fully offline. Set `PRELOAD_MODELS: ""`
 in `docker-compose.yml` to forbid all downloads and supply `.pt` files yourself.
 
@@ -148,10 +150,12 @@ python run.py          # → http://127.0.0.1:8811
    index, so keep it stable across versions.
 3. **Upload** — drag & drop; originals are stored untouched, thumbnails are generated.
 4. **Annotate** — `S` SAM assist, `B` box, `P` polygon, `V` select, `H`/Space pan,
-   `F` fit, `1-9` class, `←/→` image, `↵` accept SAM mask, `Del` remove,
+   `F` fit, `1-9` / `0` class, `←/→` image, `↵` accept SAM mask, `Del` remove,
    `Esc` discard. Saves automatically.
-5. **Auto-label** — run a pretrained / uploaded / YAAP-trained model over
-   unannotated images, then review (model output is marked with confidence).
+5. **Auto-label** — after labeling ~10 images, **⚡ Bootstrap** trains a quick model and
+   pre-labels the rest; or run a pretrained / uploaded / YAAP-trained model, or let
+   SAM 3 find objects by name. Then review (model output is marked with confidence).
+   Labels you make while a job runs are never overwritten.
 6. **Generate** — choose splits, preprocessing and augmentations (preview them
    first), set the per-image multiplier, generate a version.
 7. **Versions** — download the zip, or note the folder path under
@@ -184,16 +188,21 @@ YAAP/
 ├─ backend/
 │  ├─ app.py                  # FastAPI app + static hosting
 │  ├─ config.py  db.py  schemas.py
-│  ├─ routers/                # projects, images, annotations, sam, models, datasets, training
+│  ├─ routers/                # projects, images, annotations, sam, models, datasets, training, bootstrap
 │  └─ services/
 │     ├─ storage.py           # uploads, thumbnails, project folders
-│     ├─ sam.py               # SAM 3 point/box prompting, mask → polygon
+│     ├─ sam.py               # SAM 3 point/box/exemplar/text prompting, GPU sharing, mask → polygon
 │     ├─ inference.py         # ultralytics (YOLO/RT-DETR) + RF-DETR batch auto-label 
 │     ├─ augmenter.py         # albumentations; polygons via keypoints
 │     ├─ exporter.py          # version generation, YOLO or COCO det/seg/cls export, zip
 │     ├─ importer.py          # zip → project import, project → project merge
+│     ├─ health.py            # version health statistics
 │     ├─ trainer.py           # subprocess job control
-│     └─ train_worker.py      # the actual `ultralytics` training process
+│     ├─ train_worker.py      # the actual `ultralytics` training process
+│     ├─ ssh_runner.py        # SSH training (remote_train.py runs on the other machine)
+│     ├─ bootstrap.py         # train on a few labels, pre-label the rest
+│     ├─ jobs.py              # safe writes next to a working user, idle-shutdown handshake
+│     └─ cleanup.py           # deleting a project and everything it owns
 ├─ frontend/                  # zero-build vanilla JS
 │  ├─ index.html  css/yaap.css
 │  └─ js/api.js  js/editor.js  js/app.js
@@ -208,11 +217,15 @@ YAAP/
 
 ## Testing
 
+What every test checks, how they work and how to run one file or one test:
+[`TESTS.md`](TESTS.md). How to use and manually test the newer features:
+[`FEATURES_USAGE.md`](FEATURES_USAGE.md).
+
 **Backend** — pytest, against a throwaway data dir (your real `data/` is never touched).
-`inference.predict()` is mocked, so no model weights are needed:
+Model calls are mocked, so no model weights are needed:
 
 ```bash
-docker compose exec yaap pytest -q
+docker compose exec -u yaap yaap pytest -q
 ```
 
 **Frontend** — each `tests/frontend/*.test.html` loads the real `frontend/index.html`

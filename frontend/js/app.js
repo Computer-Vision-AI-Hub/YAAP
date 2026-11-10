@@ -15,7 +15,11 @@ const S = { project: null, images: [], curImage: -1, editor: null, saveTimer: nu
             // set by viewAnnotate() while it's the active view; lets the Home button
             // (and reaching the last image) run the same save+push-to-review confirm
             // as the editor's own Exit button, instead of just jumping away silently
-            onLeaveAnnotate: null };
+            onLeaveAnnotate: null,
+            // route() bumps navSeq; a view that awaited data checks it so it doesn't paint over a newer view
+            navSeq: 0,
+            // set by viewAnnotate(): save before route() swaps the view / flush on tab close
+            beforeLeave: null, flushSave: null };
 
 /* ── plumbing ─────────────────────────────────────────────────────── */
 function toast(msg, kind = "", ms = 4200) {
@@ -48,13 +52,18 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#viewer").addEventListener("close", () => { if (!$("#viewer").open) $("#viewerBody").innerHTML = ""; });
   loadDevice();
   route();
-  fetch("/api/system/here", { method: "POST" }).catch(() => {});
+  const here = () => fetch(`/api/system/here?tab=${TAB_ID}`, { method: "POST" }).catch(() => {});
+  here();
+  setInterval(here, 20000);          // heartbeat: the server shuts down only when no tab is left
 });
+// one id per tab, so closing one of two tabs doesn't shut YAAP down
+const TAB_ID = Math.random().toString(36).slice(2, 12);
 // tells launch.sh's host-side watcher we're actually leaving (tab closed,
 // navigated away, or reloading) — not just backgrounded — so it can free the
 // container's resources after a grace period if we don't come back
 window.addEventListener("pagehide", () => {
-  navigator.sendBeacon && navigator.sendBeacon("/api/system/leaving");
+  S.flushSave?.();                   // an edit made in the last 0.7 s must not be lost (see viewAnnotate)
+  navigator.sendBeacon && navigator.sendBeacon(`/api/system/leaving?tab=${TAB_ID}`);
 });
 
 async function loadDevice() {
@@ -68,6 +77,10 @@ async function loadDevice() {
 }
 
 async function route() {
+  const seq = ++S.navSeq;
+  const leaving = S.beforeLeave; S.beforeLeave = null;
+  if (leaving) await leaving();       // the annotator saves pending edits before it goes away
+  if (seq !== S.navSeq) return;
   clearInterval(S.jobPoll); clearInterval(S.verPoll);
   S.onLeaveAnnotate = null;   // stale hook would otherwise fire against a view that's no longer live
   if ($("#viewer")?.open) closeViewer();
@@ -78,9 +91,9 @@ async function route() {
   if (!m) { S.project = null; $("#rail").hidden = true; $("#topbarMid").innerHTML = ""; return viewHome(); }
   const [, pid, view] = m;
   try {
-    if (!S.project || S.project.id !== +pid) S.project = await API.project(+pid);
-    else S.project = await API.project(+pid);
+    S.project = await API.project(+pid);
   } catch (e) { err(e); location.hash = "#/"; return; }
+  if (seq !== S.navSeq) return;
   $("#rail").hidden = false;
   $$(".rail-btn").forEach(b => b.classList.toggle("active", b.dataset.view === view));
   $("#topbarMid").innerHTML = `
@@ -95,9 +108,11 @@ async function route() {
 
 /* ── home: projects ───────────────────────────────────────────────── */
 async function viewHome() {
+  const seq = S.navSeq;
   const stage = $("#stage");
   let projects = [];
   try { projects = await API.projects(); } catch (e) { err(e); }
+  if (seq !== S.navSeq) return;     // the user went to another view meanwhile
   stage.innerHTML = `<div class="stage-pad">
     <h1 class="page">Projects</h1>
     <p class="sub">Everything lives on this machine — images, labels, models and training runs
@@ -263,7 +278,9 @@ async function viewUpload() {
     try {
       const res = await API.importDataset(p.id, f);
       toast(`✓ Imported ${res.images_created} image(s)` +
-            (res.images_skipped ? `, skipped ${res.images_skipped}` : ""), "ok", 8000);
+            (res.images_skipped ? `, skipped ${res.images_skipped}` : "") +
+            (res.label_lines_skipped ? ` · ${res.label_lines_skipped} malformed label line(s) skipped, e.g. ${res.label_line_errors[0]}` : ""),
+            res.label_lines_skipped ? "err" : "ok", 10000);
       route();
     } catch (e) { err(e); }
     btn.disabled = false; btn.textContent = label;
@@ -306,9 +323,11 @@ const qcMatch = (im, filter) => filter === "proposals" ? im.proposal_count > 0 :
   : im.status === filter;
 
 async function viewReview() {
+  const seq = S.navSeq;
   const p = S.project;
   let images;
   try { images = await API.images(p.id); } catch (e) { return err(e); }
+  if (seq !== S.navSeq) return;     // the user went to another view meanwhile
   if (!images.length) { nav("upload"); return; }   // nothing to review yet — go straight to Upload
   S.qcFilter = S.qcFilter || "reviewable";
 
@@ -482,11 +501,13 @@ function startQuickReview(imgId, mode = "review") {
                 the approved set, so it makes sense to move on). Both share
                 zoom/pan (wheel or +/− buttons) on the image itself. ── */
 async function viewQuickReview() {
+  const seq = S.navSeq;
   const p = S.project;
   const mode = S.reviewMode || "review";
   S.reviewMode = null;
   let images;
   try { images = await API.images(p.id); } catch (e) { return err(e); }
+  if (seq !== S.navSeq) return;
 
   let queue = images.filter(im => qcMatch(im, mode === "approved" ? "approved" : "reviewable"));
   if (S.reviewOnly) {
@@ -509,6 +530,7 @@ async function viewQuickReview() {
 
   function onKey(e) {
     if (e.target.matches("input,textarea,select")) return;
+    if (e.key === "Escape") return $("#qrExit")?.click();
     if (mode === "review") {
       const k = e.key.toLowerCase();
       if (k === "a") $("#qrAccept")?.click();
@@ -552,7 +574,10 @@ async function viewQuickReview() {
       </div>`;
 
     $("#stage").innerHTML = `<div class="stage-pad" style="max-width:900px">
-      <h1 class="page">${mode === "approved" ? "Approved images" : "Review queue"}</h1>
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <h1 class="page">${mode === "approved" ? "Approved images" : "Review queue"}</h1>
+        <button class="btn ghost" id="qrExit" title="Back to the project Home (Esc)">⏏ Exit</button>
+      </div>
       <p class="sub">${idx + 1} of ${queue.length} · ${esc(im.filename)} · ${anns.length} annotation(s)</p>
       <div class="qr-frame">
         <svg viewBox="0 0 ${im.width} ${im.height}" preserveAspectRatio="xMidYMid meet">
@@ -569,6 +594,7 @@ async function viewQuickReview() {
       ${actionsHtml}
     </div>`;
 
+    $("#qrExit").onclick = () => nav("review");
     $("#qrZoomIn").onclick = () => setZoom(zoom + 0.25);
     $("#qrZoomOut").onclick = () => setZoom(zoom - 0.25);
     $("#qrZoomReset").onclick = () => setZoom(1);
@@ -587,7 +613,13 @@ async function viewQuickReview() {
     }
   }
 
+  let deciding = false;
   async function decide(status) {
+    if (deciding) return;               // a second A/R before the next image is shown would hit it unseen
+    deciding = true;
+    try { await decideNow(status); } finally { deciding = false; }
+  }
+  async function decideNow(status) {
     const im = queue[idx];
     // Accept approves what was shown — a Bootstrap round may have replaced it meanwhile
     const body = status === "approved" ? { status, expect_annotations: shownAnnIds } : { status };
@@ -602,7 +634,7 @@ async function viewQuickReview() {
       nav("review");
       return;
     }
-    renderCurrent();
+    await renderCurrent();
   }
 
   async function revert() {
@@ -644,7 +676,7 @@ async function viewClasses() {
         <input type="color" value="${c.color}" title="Class color">
         <span class="swatch" style="background:${c.color}"></span>
         <span class="nm" contenteditable spellcheck="false">${esc(c.name)}</span>
-        <span class="idx">idx ${i} · key ${i < 9 ? i + 1 : "—"}</span>
+        <span class="idx">idx ${i} · key ${i < 9 ? i + 1 : i === 9 ? 0 : "—"}</span>
         <button class="btn ghost small">✕</button>
       </div>`).join("") || `<div class="empty">No classes yet — add one above.</div>`;
     const box = $("#clsProposals");
@@ -681,8 +713,10 @@ async function viewClasses() {
 
 /* ── annotate ─────────────────────────────────────────────────────── */
 async function viewAnnotate() {
+  const seq = S.navSeq;
   const p = S.project;
   try { S.images = await API.images(p.id); } catch (e) { return err(e); }
+  if (seq !== S.navSeq) return;     // the user went to another view meanwhile
   if (!S.images.length) {
     $("#stage").innerHTML = `<div class="stage-pad"><div class="empty">Upload images first.</div></div>`; return;
   }
@@ -702,7 +736,7 @@ async function viewAnnotate() {
       S.annotateScope = null;
       $("#stage").innerHTML = `<div class="stage-pad"><div class="empty">
         No images to annotate. <br><br>
-        <button class="btn primary" onclick="location.hash='#/'">Return to Home</button></div></div>`;
+        <button class="btn primary" onclick="nav('review')">Return to Home</button></div></div>`;
       return;
     }
     S.images = scoped;
@@ -710,12 +744,13 @@ async function viewAnnotate() {
   S.annotateScope = null;   // one-shot — only applies to this entry, not future navigation
 
   // active learning: ranked images exist → offer to walk them most-uncertain first
-  // (unlabeled images only; everything else keeps its order, after them)
+  // (images nobody has checked yet — unlabeled or holding unreviewed predictions; the rest keeps its order, after them)
   const hasScores = S.images.some(im => im.uncertainty != null);
   let uncOn = false;
   try { uncOn = hasScores && localStorage.getItem("yaap.uncertainFirst") === "1"; } catch (_) {}
   if (uncOn) {
-    const ranked = S.images.filter(im => im.uncertainty != null && !im.annotation_count)
+    const unchecked = ["unannotated", "auto-annotated", "review"];
+    const ranked = S.images.filter(im => im.uncertainty != null && unchecked.includes(im.status))
       .sort((a, b) => b.uncertainty - a.uncertainty);
     const rest = S.images.filter(im => !ranked.includes(im));
     S.images = [...ranked, ...rest];
@@ -750,6 +785,9 @@ async function viewAnnotate() {
         <button class="tool-btn" data-tool="polygon" title="Polygon (P)" ${p.task_type === "detect" ? "style='display:none'" : ""}>⬠</button>
         <button class="tool-btn sam" data-tool="sam" title="SAM assist — click / shift-click / drag box (S)">✦</button>
         <button class="tool-btn" data-tool="pan" title="Pan (H, or hold Space)">✥</button>
+        <span class="tool-sep"></span>
+        <button class="tool-btn" id="edUndo" title="Undo (Ctrl+Z)" disabled>↶</button>
+        <button class="tool-btn" id="edRedo" title="Redo (Ctrl+Shift+Z / Ctrl+Y)" disabled>↷</button>
       </div>
       <div class="sam-strip" id="samStrip" hidden>
         <select class="input" id="samModel" title="Model variant"></select>
@@ -781,7 +819,7 @@ async function viewAnnotate() {
     </div>
     <aside class="ed-side">
       ${isCls ? `<h4>Label this image</h4><div class="cls-panel" id="clsPanel"></div>`
-              : `<h4>Classes <span class="kbd">1–9</span></h4><div class="ed-classes" id="edClasses"></div>
+              : `<h4>Classes <span class="kbd">1–9, 0</span></h4><div class="ed-classes" id="edClasses"></div>
                  <h4>Annotations</h4><div class="ed-anns" id="edAnns"></div>
                  <button class="btn small ghost" id="edMarkEmpty" style="width:100%;margin-top:8px"
                    title="No objects in this image — mark it empty so it stops showing as unannotated">∅ Mark empty</button>`}
@@ -798,21 +836,36 @@ async function viewAnnotate() {
     classes: () => S.project.classes,
     getActiveClass: () => S.project.classes.find(c => c.id === S.activeClassId),
     onChange: () => { markDirty(); renderAnnList(); },
-    onSelect: () => renderAnnList(),
+    onSelect: i => markSelectedRow(i),          // just move the highlight — rebuilding 900 rows took 0.2 s
     onToolKey: setTool,
-    onClassKey: i => { const c = p.classes[i]; if (c) { S.activeClassId = c.id; renderSide(); } },
+    onClassKey: i => {
+      const c = p.classes[i]; if (!c) return;
+      if (isCls) return tagImage(c.id);          // classification: the key IS the label
+      S.activeClassId = c.id; renderSide();
+      if (editor.pendingShape) { $("#samLabelPick").hidden = true; editor.assignPendingClass(c.id); }
+      else if (!walk && editor.samPending.some(r => !r.off)) acceptSam(c.id);   // a SAM outline waits: the key labels it
+    },
     onSamPrompt: runSamPrompt,
     onSamAccept: acceptSam,
     onSamFindAll: () => findAllLikeThis(),
     onSamToggle: ed => { updateSamStrip(ed); samHint(`${ed.samPending.filter(r => !r.off).length}/${ed.samPending.length} match(es) kept — ctrl-click to toggle, then Accept`); },
     onSamState: updateSamStrip,
     onPendingShape: renderLabelPick,
+    onHistory: ed => syncUndoButtons(ed),
   });
+  // classification projects have no toolbar (no ↶/↷ buttons) — Ctrl+Z / Ctrl+Y still work there
+  function syncUndoButtons(ed = editor) {
+    const u = $("#edUndo"), r = $("#edRedo");
+    if (u) u.disabled = !ed.canUndo();
+    if (r) r.disabled = !ed.canRedo();
+  }
+  if ($("#edUndo")) $("#edUndo").onclick = () => editor.undo();
+  if ($("#edRedo")) $("#edRedo").onclick = () => editor.redo();
   // through the local setTool so the toolbar highlight matches the tool
   if (p.task_type === "segment") setTool("polygon");
   if (isCls) setTool("pan");
 
-  $$(".tool-btn").forEach(b => b.onclick = () => setTool(b.dataset.tool));
+  $$(".tool-btn[data-tool]").forEach(b => b.onclick = () => setTool(b.dataset.tool));
   function setTool(t) {
     editor.setTool(t);
     $$(".tool-btn").forEach(b => b.classList.toggle("active", b.dataset.tool === t));
@@ -847,9 +900,8 @@ async function viewAnnotate() {
         toast("SAM needs ultralytics installed on the server (pip install ultralytics).", "err");
       else {                       // load SAM in the background so the first click / E isn't slow
         samHint("warming up SAM…");
-        API.samWarmup({ model_name: $("#samModel").value })
-          .then(() => samHint("click ＋ · shift-click − · drag box"))
-          .catch(() => samHint("click ＋ · shift-click − · drag box"));
+        const idle = () => { if ($("#samHint")?.textContent === "warming up SAM…") samHint("click ＋ · shift-click − · drag box"); };
+        API.samWarmup({ model_name: $("#samModel").value }).then(idle, idle);
       }
       samReady = true;
     } catch (e) { err(e); }
@@ -925,6 +977,7 @@ async function viewAnnotate() {
   function finishWalk() {
     if (!walk) return;                      // already finished (the last class pick ends it)
     const done = walkLabeled(), fromProposals = walk.proposals;
+    if (done.length) editor.checkpoint();
     for (const r of done) pushSamAnn(r, p.classes.find(c => c.id === r.cls));
     const dropped = editor.samPending.length - done.length;
     toast(`Added ${done.length} labeled ${p.task_type === "detect" ? "box(es)" : "polygon(s)"}` +
@@ -946,7 +999,7 @@ async function viewAnnotate() {
     box.innerHTML = `
       <div class="sam-walk-head">Box ${walk.i + 1} / ${pend.length} · ${Math.round(r.score * 100)}% · ${walkLabeled().length} labeled</div>
       ${p.classes.map((c, i) => `<button class="sam-label-chip" data-id="${c.id}">
-        <span class="swatch" style="background:${c.color}"></span>${esc(c.name)}${i < 9 ? ` <span class="kbd">${i + 1}</span>` : ""}</button>`).join("")}
+        <span class="swatch" style="background:${c.color}"></span>${esc(c.name)}${i < 10 ? ` <span class="kbd">${(i + 1) % 10}</span>` : ""}</button>`).join("")}
       <div class="sam-walk-actions">
         <button class="btn small danger" id="walkDel" title="This box is wrong — erase it (Del / X)">🗑 Erase box</button>
         <button class="btn small" id="walkPrev" title="Previous (←)">←</button>
@@ -970,7 +1023,7 @@ async function viewAnnotate() {
     if (!walk || e.target.matches("input,textarea,select,[contenteditable]") || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
     let handled = true;
-    if (/^[1-9]$/.test(k)) { const c = p.classes[+k - 1]; if (c) walkAssign(c.id); }
+    if (/^[0-9]$/.test(k)) { const c = p.classes[k === "0" ? 9 : +k - 1]; if (c) walkAssign(c.id); }
     else if (k === "delete" || k === "backspace" || k === "x") walkDelete();
     else if (e.key === "ArrowRight" || e.key === "Tab" && !e.shiftKey) focusWalk(walk.i + 1);
     else if (e.key === "ArrowLeft" || e.key === "Tab" && e.shiftKey) focusWalk(walk.i - 1);
@@ -1003,12 +1056,16 @@ async function viewAnnotate() {
     const [ix, iy] = pending ? pending.anchor : [mask.bbox.x + mask.bbox.w / 2, mask.bbox.y];
     const [sx, sy] = editor.toScr(ix, iy);
     box.hidden = false;
-    box.style.left = `${sx}px`;
-    box.style.top = `${Math.max(4, sy)}px`;
+    // above the anchor if it fits, else below it; always inside the canvas (it used to hang off the top edge)
+    const wrap = box.parentElement.getBoundingClientRect(), bw = box.offsetWidth, bh = box.offsetHeight;
+    const below = sy - bh - 8 < 4;
+    box.style.transform = "none";
+    box.style.left = `${Math.min(Math.max(4, sx - bw / 2), Math.max(4, wrap.width - bw - 4))}px`;
+    box.style.top = `${below ? Math.min(sy + 12, Math.max(4, wrap.height - bh - 4)) : sy - bh - 8}px`;
   }
+  let samAgain = false;
   async function runSamPrompt(ed) {
-    if (samBusy) return;
-    const im = S.images[S.curImage];
+    if (samBusy) { samAgain = true; return; }   // re-run with every click once the current answer is in
     const prompt = ed.samBox
       ? { type: "box", box: [ed.samBox.x0, ed.samBox.y0, ed.samBox.x1, ed.samBox.y1] }
       : { type: "point", points: ed.samPts.map(q => [q[0], q[1]]), labels: ed.samPts.map(q => q[2]) };
@@ -1022,12 +1079,16 @@ async function viewAnnotate() {
   }
   $("#samFindAll") && ($("#samFindAll").onclick = () => findAllLikeThis());
   async function callSam(prompt, extra = {}) {
-    const im = S.images[S.curImage];
+    const im = editingImage;
     const exemplar = prompt.type === "exemplar";
     samBusy = true; samHint(exemplar ? "searching for similar objects…" : "segmenting…");
     try {
       const r = await API.samPredict(p.id, im.id,
-        { model_name: $("#samModel").value, prompt, simplify: +$("#samSimplify").value, ...extra });
+        { model_name: $("#samModel").value || "sam3.pt",      // a click before the model list loaded
+          prompt, simplify: +$("#samSimplify").value || 0.008, ...extra });
+      if (im !== editingImage || S.editor !== editor) {    // the user went to another image meanwhile
+        samBusy = false; samAgain = false; samHint(""); return;
+      }
       let found = r.results || [], already = 0;
       if (exemplar) {                    // "find all like this": skip objects that already have a box
         const taken = editor.anns.filter(a => annBox(a));
@@ -1041,6 +1102,7 @@ async function viewAnnotate() {
       }
       editor.samPending = found;
       const note = already ? ` · ${already} already labeled` : "";
+      if (already && exemplar) toast(`${already} match(es) already have a box — left out.`, "ok");
       samHint(editor.samPending.length
         ? (exemplar ? `${editor.samPending.length} match(es)${note} — ctrl-click one to exclude, then Accept`
                     : `${editor.samPending.length} mask(s) — refine with more clicks, then Accept`)
@@ -1048,16 +1110,21 @@ async function viewAnnotate() {
     } catch (e) { samHint(""); err(e); }
     samBusy = false;
     updateSamStrip(editor); editor.draw();
+    if (samAgain && !exemplar) {                        // clicks / simplify changes made while it ran
+      samAgain = false;
+      if (editor.samPts.length || editor.samBox) return runSamPrompt(editor);
+    }
+    samAgain = false;
     if (exemplar && editor.samPending.length) startWalk();
   }
   $("#samAccept") && ($("#samAccept").onclick = () => acceptSam());
   $("#samDiscard") && ($("#samDiscard").onclick = () => editor.clearSam());
   function pushSamAnn(r, cls) {
     if (p.task_type === "detect")            // segmentation → detection format
-      editor.anns.push({ class_id: cls.id, kind: "bbox", source: "model",
+      editor.anns.push({ class_id: cls.id, kind: "bbox", source: "model", origin: "sam",
         confidence: r.score, data: { ...r.bbox } });
     else                                     // instance segmentation format
-      editor.anns.push({ class_id: cls.id, kind: "polygon", source: "model",
+      editor.anns.push({ class_id: cls.id, kind: "polygon", source: "model", origin: "sam",
         confidence: r.score, data: { points: r.polygon.map(q => [q[0], q[1]]) } });
   }
   function acceptSam(clsId) {
@@ -1066,6 +1133,7 @@ async function viewAnnotate() {
     if (!kept.length) return;
     const cls = p.classes.find(c => c.id === (clsId ?? S.activeClassId));
     if (!cls) return toast("Pick a class first.", "err");
+    editor.checkpoint();
     for (const r of kept) pushSamAnn(r, cls);
     toast(`Added ${kept.length} ${p.task_type === "detect" ? "box(es)" : "polygon(s)"} as “${cls.name}”.`, "ok");
     editor.clearSam(false);
@@ -1096,26 +1164,121 @@ async function viewAnnotate() {
   // the image the editor is showing — save() writes here, not to whatever
   // S.images[S.curImage] points at by the time the debounced save fires
   let editingImage = null;
+  let editGen = 0;            // bumped by every edit: a save only counts as done if nothing changed while it ran
+  let saving = null;          // the save in flight — saves never overlap
+  let serverIds = [];         // annotation ids the server holds for editingImage, as of our last load/save
+  let baseline = new Map();   // id → that annotation as last loaded/saved (the base of a 3-way merge)
+  const annKey = a => JSON.stringify([a.class_id, a.kind, a.data]);
+  const toBody = a => ({ class_id: a.class_id, kind: a.kind, data: a.data, source: a.source,
+                         confidence: a.confidence, origin: a.origin || "" });
+  function setBaseline(anns) {
+    serverIds = anns.map(a => a.id);
+    baseline = new Map(anns.map(a => [a.id, annKey(a)]));
+  }
+  function setSaveState(text, cls) {
+    const st = $("#saveState");   // gone if the save finished after leaving the view
+    if (st) { st.textContent = text; st.className = `savestate ${cls}`; }
+  }
   function markDirty() {
-    dirty = true;
-    const st = $("#saveState"); st.textContent = "unsaved"; st.className = "savestate dirty";
+    dirty = true; editGen++;
+    setSaveState("unsaved", "dirty");
     clearTimeout(S.saveTimer);
     S.saveTimer = setTimeout(save, 700);
     renderMarkEmpty();   // drawing/deleting anything should reset the "empty" flag right away, not after the debounce
   }
+  // → true once everything on screen is on the server; false if the server refused / is unreachable
   async function save() {
-    if (!dirty) return;
-    const im = editingImage;
-    try {
-      await API.saveAnnotations(p.id, im.id, editor.anns.map(a =>
-        ({ class_id: a.class_id, kind: a.kind, data: a.data, source: a.source, confidence: a.confidence })));
-      dirty = false;
-      const st = $("#saveState");   // gone if the save finished after leaving the view
-      if (st) { st.textContent = "saved"; st.className = "savestate saved"; }
-      im.annotation_count = editor.anns.length;
-      im.status = editor.anns.length ? "annotated" : "unannotated";
-    } catch (e) { err(e); }
+    for (let round = 0; round < 5; round++) {
+      while (saving) await saving;
+      if (!dirty) return true;
+      clearTimeout(S.saveTimer);
+      saving = doSave(editingImage, editGen).finally(() => { saving = null; });
+      if (await saving === "failed") return false;
+      // "stale": the user kept editing while it ran — loop and send the newer state right away
+    }
+    return !dirty;
   }
+  async function doSave(im, gen, merged = false) {
+    const sent = editor.anns.slice();
+    let r;
+    try {
+      r = await API.saveAnnotations(p.id, im.id, sent.map(toBody), serverIds);
+    } catch (e) {
+      if (e.status === 409 && !merged && im === editingImage) {   // changed elsewhere: merge, then save again
+        try { await mergeRemote(im); } catch (e2) { err(e2); setSaveState("unsaved", "dirty"); return "failed"; }
+        return doSave(im, editGen, true);
+      }
+      err(e);
+      setSaveState("not saved — retrying", "dirty");
+      clearTimeout(S.saveTimer); S.saveTimer = setTimeout(save, 5000);    // keep trying in the background
+      return "failed";
+    }
+    const saved = r && Array.isArray(r.annotations) ? r.annotations : null;
+    if (saved && im === editingImage) {
+      setBaseline(saved);
+      if (saved.length === sent.length) sent.forEach((a, i) => { a.id = saved[i].id; });   // same order as sent
+    }
+    if (r?.dropped_unknown_class) await classDeletedElsewhere(im, r.dropped_unknown_class);
+    im.annotation_count = saved ? saved.length : sent.length;
+    im.status = r?.status || (sent.length ? "annotated" : "unannotated");
+    if (gen !== editGen) return "stale";
+    dirty = false; setSaveState("saved", "saved");
+    return "saved";
+  }
+  // someone else wrote this image (a job's predictions, another tab): keep their new annotations, keep the
+  // user's edits, and accept their deletions only for annotations the user hasn't touched
+  async function mergeRemote(im) {
+    const current = await API.annotations(p.id, im.id);
+    const curIds = new Set(current.map(a => a.id));
+    const localIds = new Set(editor.anns.map(a => a.id).filter(x => x != null));
+    const kept = editor.anns.filter(a => !(a.id != null && baseline.has(a.id) && !curIds.has(a.id)
+                                           && baseline.get(a.id) === annKey(a)));
+    const added = current.filter(a => !baseline.has(a.id) && !localIds.has(a.id));
+    editor.checkpoint();
+    editor.anns = [...kept, ...added.map(a => ({ ...a }))];
+    setBaseline(current);
+    dirty = true; editGen++;
+    editor.select(-1); editor.draw(); renderAnnList();
+    toast(`This image was changed elsewhere (a job or another tab) — merged` +
+          (added.length ? `, ${added.length} new annotation(s) kept` : "") + ".", "ok", 8000);
+  }
+  async function classDeletedElsewhere(im, n) {
+    toast(`${n} annotation(s) of a class deleted elsewhere were dropped.`, "err", 8000);
+    try { S.project = await API.project(p.id); p.classes = S.project.classes; } catch (_) { return; }
+    if (im !== editingImage) return;
+    const ok = new Set(p.classes.map(c => c.id));
+    editor.anns = editor.anns.filter(a => ok.has(a.class_id));
+    editor.draw(); renderSide();
+  }
+  // a freshly drawn box still waiting for its class: give it the active class instead of dropping it
+  function labelPendingShape() {
+    if (!editor.pendingShape) return true;
+    const c = p.classes.find(x => x.id === S.activeClassId);
+    if (!c) { toast("Pick a class for the new box first (Esc drops it).", "err"); return false; }
+    editor.assignPendingClass(c.id);
+    return true;
+  }
+  // closing the tab: send what's unsaved (keepalive outlives the page), and ask first when that may fail
+  S.flushSave = () => {
+    if (!dirty || !editingImage) return;
+    const body = JSON.stringify({ annotations: editor.anns.map(toBody), expect_ids: serverIds });
+    try {
+      fetch(`/api/projects/${p.id}/images/${editingImage.id}/annotations`,
+            { method: "PUT", headers: { "Content-Type": "application/json" }, body, keepalive: body.length < 60000 });
+    } catch (_) {}
+  };
+  const beforeUnload = e => { if (dirty) { S.flushSave(); e.preventDefault(); e.returnValue = ""; } };
+  window.addEventListener("beforeunload", beforeUnload);
+  window.addEventListener("hashchange", function dropUnloadGuard() {
+    window.removeEventListener("beforeunload", beforeUnload);
+    window.removeEventListener("hashchange", dropUnloadGuard);
+    if (S.flushSave && !document.querySelector("#edCanvas")) S.flushSave = null;
+  });
+  // leaving through the rail or a link: save first, and say so if that failed (it can't be undone then)
+  S.beforeLeave = async () => {
+    if (!(await save()))
+      toast(`Your last changes to “${editingImage?.filename}” could not be saved.`, "err", 12000);
+  };
 
   // Shared by the Exit button, the Home/brand nav, and running past the last
   // image with Next: save whatever's pending, then land on the project's Home
@@ -1125,14 +1288,22 @@ async function viewAnnotate() {
   // status means "flagged for re-annotation" (the Reject button), so doing it
   // on a normal exit used to mislabel perfectly fine images as rejected.
   async function leaveAnnotator() {
-    await save();
+    labelPendingShape();
+    if (!(await save()) &&
+        !confirm("Your latest changes to this image could not be saved (is the server running?). Leave anyway and lose them?"))
+      return;
+    S.beforeLeave = null;
     nav("review");   // the project's Home dashboard, not the global projects list
   }
   S.onLeaveAnnotate = leaveAnnotator;
   $("#edExit").onclick = leaveAnnotator;
 
   async function go(i) {
-    await save();
+    if (!labelPendingShape()) return;
+    if (!(await save())) {      // never walk away from edits the server didn't take
+      toast("Couldn't save this image — staying on it. YAAP keeps retrying; check that the server is running.", "err", 8000);
+      return;
+    }
     if (i < 0) return;
     if (i >= S.images.length) { await leaveAnnotator(); return; }
     S.curImage = i;
@@ -1145,11 +1316,21 @@ async function viewAnnotate() {
     $("#imgPos").textContent = `${S.curImage + 1}/${S.images.length}`;
     const warnEl = $("#edAnnotatedWarn");
     if (warnEl) warnEl.hidden = !(warnIfAnnotated && im.status !== "unannotated");
-    const [el, anns] = await Promise.all([
-      new Promise((res, rej) => { const x = new Image(); x.onload = () => res(x); x.onerror = rej; x.src = API.imageUrl(p.id, im.id); }),
-      API.annotations(p.id, im.id),
-    ]);
-    editor.load(el, anns);
+    let el, anns;
+    try {
+      [el, anns] = await Promise.all([
+        new Promise((res, rej) => {
+          const x = new Image(); x.onload = () => res(x);
+          x.onerror = () => rej(new Error(`The browser can't display “${im.filename}” — re-upload it as JPEG or PNG.`));
+          x.src = API.imageUrl(p.id, im.id);
+        }),
+        API.annotations(p.id, im.id),
+      ]);
+    } catch (e) { return err(e); }
+    if (editingImage !== im) return;          // moved on while this one was loading
+    setBaseline(anns); dirty = false;
+    editor.load(el, anns, im.id);             // undo history is kept per image while the editor is open
+    syncUndoButtons();
     $("#edHud").textContent = `${im.width}×${im.height}px`;
     renderApprove(); renderReject(); renderMarkEmpty();
     renderSide();
@@ -1185,14 +1366,17 @@ async function viewAnnotate() {
     btn.textContent = im.status === "approved" ? "✓ Approved" : "✓ Approve";
     btn.classList.toggle("primary", im.status === "approved");
   }
-  $("#edApprove") && ($("#edApprove").onclick = async () => {
-    const im = S.images[S.curImage];
+  const unflagged = () => editor.anns.length ? "annotated" : "unannotated";   // clearing a flag
+  $("#edApprove") && ($("#edApprove").onclick = async e => {
+    const im = S.images[S.curImage], btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
     try {
-      await API.patchImage(p.id, im.id, { status: im.status === "approved" ? "annotated" : "approved" });
-      im.status = im.status === "approved" ? "annotated" : "approved";
+      im.status = (await API.patchImage(p.id, im.id, { status: im.status === "approved" ? unflagged() : "approved" })).status;
       renderApprove(); renderReject(); renderMarkEmpty();
       toast(im.status === "approved" ? "Marked as approved." : "Approval cleared.", "ok");
-    } catch (e) { err(e); }
+    } catch (e2) { err(e2); }
+    btn.disabled = false;
   });
 
   function renderReject() {
@@ -1201,15 +1385,17 @@ async function viewAnnotate() {
     btn.textContent = im.status === "needs_reannotation" ? "✕ Rejected" : "✕ Reject";
     btn.classList.toggle("danger", im.status === "needs_reannotation");
   }
-  $("#edReject") && ($("#edReject").onclick = async () => {
-    const im = S.images[S.curImage];
+  $("#edReject") && ($("#edReject").onclick = async e => {
+    const im = S.images[S.curImage], btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
     try {
-      const next = im.status === "needs_reannotation" ? "annotated" : "needs_reannotation";
-      await API.patchImage(p.id, im.id, { status: next });
-      im.status = next;
+      const next = im.status === "needs_reannotation" ? unflagged() : "needs_reannotation";
+      im.status = (await API.patchImage(p.id, im.id, { status: next })).status;
       renderApprove(); renderReject(); renderMarkEmpty();
       toast(im.status === "needs_reannotation" ? "Flagged for re-annotation." : "Rejection cleared.", "ok");
-    } catch (e) { err(e); }
+    } catch (e2) { err(e2); }
+    btn.disabled = false;
   });
 
   function renderMarkEmpty() {
@@ -1234,14 +1420,16 @@ async function viewAnnotate() {
     if (editor.anns.length &&
         !confirm(`This image has ${editor.anns.length} annotation(s). Clear them and mark it empty (no objects)?`)) return;
     clearTimeout(S.saveTimer);
+    editor.checkpoint();
     editor.anns = [];
     editor.select(-1);
     editor.draw();
     try {
+      while (saving) await saving;
       await API.saveAnnotations(p.id, im.id, []);
       await API.patchImage(p.id, im.id, { status: "empty" });
     } catch (e) { return err(e); }
-    dirty = false;
+    setBaseline([]); dirty = false; editGen++;
     const st = $("#saveState"); st.textContent = "saved"; st.className = "savestate saved";
     im.annotation_count = 0; im.status = "empty";
     renderApprove(); renderReject(); renderMarkEmpty(); renderAnnList();
@@ -1253,46 +1441,65 @@ async function viewAnnotate() {
     $("#edClasses").innerHTML = p.classes.map((c, i) => `
       <button class="ed-class ${c.id === S.activeClassId ? "active" : ""}" data-id="${c.id}">
         <span class="swatch" style="background:${c.color}"></span>${esc(c.name)}
-        <span class="key">${i < 9 ? i + 1 : ""}</span>
+        <span class="key">${i < 10 ? (i + 1) % 10 : ""}</span>
       </button>`).join("");
     $$(".ed-class").forEach(b => b.onclick = () => {
       S.activeClassId = +b.dataset.id;
-      if (editor.sel >= 0) { editor.anns[editor.sel].class_id = S.activeClassId; markDirty(); editor.draw(); }
+      if (editor.pendingShape) editor.assignPendingClass(S.activeClassId);     // labels the box waiting for a class
+      else if (editor.sel >= 0 && editor.anns[editor.sel].class_id !== S.activeClassId) {
+        editor.checkpoint(); editor.anns[editor.sel].class_id = S.activeClassId; markDirty(); editor.draw();
+      }
       renderSide();
     });
     renderAnnList();
   }
 
+  function markSelectedRow(i) {
+    const host = $("#edAnns"); if (!host) return renderClsPanel();
+    host.querySelector(".ed-ann.sel")?.classList.remove("sel");
+    const row = host.querySelector(`.ed-ann[data-i="${i}"]`);
+    if (row) { row.classList.add("sel"); row.scrollIntoView({ block: "nearest" }); }
+  }
   function renderAnnList() {
     const host = $("#edAnns"); if (!host) return renderClsPanel();
+    // one row per annotation; the class dropdown is only built for the row being relabeled
+    // (900 rows × a <select> of every class made each rebuild take 0.1–0.2 s on dense images)
+    const byId = new Map(p.classes.map(c => [c.id, c]));
     host.innerHTML = editor.anns.map((a, i) => {
-      const c = p.classes.find(x => x.id === a.class_id) || {};
+      const c = byId.get(a.class_id) || {};
       return `<div class="ed-ann ${i === editor.sel ? "sel" : ""}" data-i="${i}">
         <span class="swatch" style="background:${c.color || "#888"}"></span>
-        <select class="relabel" data-i="${i}" title="Change label">
-          ${p.classes.map(cl => `<option value="${cl.id}" ${cl.id === a.class_id ? "selected" : ""}>${esc(cl.name)}</option>`).join("")}
-        </select>
+        <button class="relabel" data-i="${i}" title="Change label">${esc(c.name || "?")} ▾</button>
         <span class="kind">${a.kind === "bbox" ? "box" : "poly"}</span>
         ${a.source === "model" ? `<span class="src-model">model ${Math.round(a.confidence * 100)}%</span>` : ""}
         <button class="rm" title="Remove">✕</button></div>`;
     }).join("") || `<div class="empty" style="padding:16px;border:none">Draw with <span class="kbd">B</span>${p.task_type !== "detect" ? " or <span class='kbd'>P</span>" : ""}</div>`;
-    $$(".ed-ann", host).forEach(row => {
-      row.onclick = e => {
-        const i = +row.dataset.i;
-        if (e.target.matches(".rm")) { editor.anns.splice(i, 1); editor.select(-1); markDirty(); editor.draw(); renderAnnList(); return; }
-        if (e.target.matches(".relabel")) return;         // handled by its own onchange
-        editor.select(i);
-        editor.draw(); renderAnnList();
-      };
-    });
-    $$(".relabel", host).forEach(sel => {
-      sel.onclick = e => e.stopPropagation();
-      sel.onchange = () => {
-        const i = +sel.dataset.i;
-        editor.anns[i].class_id = +sel.value;
-        markDirty(); editor.draw(); renderAnnList();
-      };
-    });
+    host.onclick = e => {
+      const row = e.target.closest(".ed-ann"); if (!row) return;
+      const i = +row.dataset.i;
+      if (e.target.matches(".rm")) {
+        editor.checkpoint(); editor.anns.splice(i, 1); editor.select(-1); markDirty(); editor.draw(); renderAnnList(); return;
+      }
+      if (e.target.matches("button.relabel")) return openRelabel(e.target, i);
+      if (e.target.matches("select")) return;           // handled by its own onchange
+      editor.select(i);
+      editor.draw();
+    };
+  }
+  function openRelabel(btn, i) {
+    const sel = document.createElement("select");
+    sel.className = "relabel";
+    sel.innerHTML = p.classes.map(cl =>
+      `<option value="${cl.id}" ${cl.id === editor.anns[i]?.class_id ? "selected" : ""}>${esc(cl.name)}</option>`).join("");
+    btn.replaceWith(sel);
+    sel.focus();
+    try { sel.showPicker(); } catch (_) {}
+    sel.onchange = () => {
+      editor.checkpoint();
+      editor.anns[i].class_id = +sel.value;
+      markDirty(); editor.draw(); renderAnnList();
+    };
+    sel.onblur = () => { if (sel.isConnected) renderAnnList(); };
   }
 
   function renderClsPanel() {
@@ -1300,11 +1507,17 @@ async function viewAnnotate() {
     const cur = editor.anns.find(a => a.kind === "classification");
     host.innerHTML = p.classes.map(c => `
       <button class="cls-big ${cur && cur.class_id === c.id ? "active" : ""}" data-id="${c.id}">
-        <span class="swatch" style="background:${c.color}"></span>${esc(c.name)}</button>`).join("");
-    $$(".cls-big", host).forEach(b => b.onclick = () => {
-      editor.anns = [{ class_id: +b.dataset.id, kind: "classification", data: {}, source: "manual", confidence: 1 }];
-      markDirty(); renderClsPanel();
-    });
+        <span class="swatch" style="background:${c.color}"></span>${esc(c.name)}
+        ${p.classes.indexOf(c) < 10 ? `<span class="kbd">${(p.classes.indexOf(c) + 1) % 10}</span>` : ""}</button>`).join("");
+    $$(".cls-big", host).forEach(b => b.onclick = () => tagImage(+b.dataset.id));
+  }
+  // classification: one tag per image — a click or a key (1–9, 0) sets it, replacing the previous one
+  function tagImage(classId) {
+    const cur = editor.anns.find(a => a.kind === "classification");
+    if (cur && cur.class_id === classId && cur.source === "manual") return;
+    editor.checkpoint();
+    editor.anns = [{ class_id: classId, kind: "classification", data: {}, source: "manual", confidence: 1 }];
+    markDirty(); renderClsPanel();
   }
 
   await loadImage();
@@ -1312,9 +1525,11 @@ async function viewAnnotate() {
 
 /* ── auto-label ───────────────────────────────────────────────────── */
 async function viewAutolabel() {
+  const seq = S.navSeq;
   const p = S.project;
   let models;
   try { models = await API.models(p.id, p.task_type); } catch (e) { return err(e); }
+  if (seq !== S.navSeq) return;     // the user went to another view meanwhile
   const opts = [
     ...models.weights.map(w => `<option value="weight:${w.id}">★ ${esc(w.name)} (${w.source})</option>`),
     ...models.pretrained.map(m => `<option value="${m}">${m}</option>`),
@@ -1335,6 +1550,8 @@ async function viewAutolabel() {
           <div><label class="fld">Base model</label><select class="input" id="bsModel"></select></div>
           <div><label class="fld">Epochs</label>
             <input class="input" id="bsEpochs" type="number" min="0" max="500" step="10" placeholder="auto"></div>
+          <div><label class="fld" title="Training and labeling image size. Small objects (drone / aerial photos) need 1280 or more; classification works at 224.">Image size</label>
+            <input class="input" id="bsImgsz" type="number" min="64" max="2048" step="32" placeholder="auto"></div>
           <div><label class="fld">Min confidence</label>
             <input class="input" id="bsConf" type="number" min="0.05" max="0.95" step="0.05" value="0.4"></div>
           <div><label class="fld" title="Boxes on the same object are kept once: the same class overlapping by IoU 0.5 or more, or any class overlapping by at least this value. The higher score wins; a box that is already on the image always wins. 1 = keep everything.">Duplicate overlap (IoU)</label>
@@ -1345,6 +1562,9 @@ async function viewAutolabel() {
           nobody has reviewed yet (auto-annotated) with the new model</label>
         <label class="fld"><input type="checkbox" id="bsRejected" checked> Also re-label rejected images
           (<i>Needs re-annotation</i>) with the new model — only boxes a model made are replaced</label>
+        <label class="fld"><input type="checkbox" id="bsOther"> Also replace predictions made by SAM
+          (<i>Find all</i>) or <i>Run a model</i> — off: a round only replaces its own earlier guesses
+          (an early round is often worse than SAM)</label>
       </div></details>
       <div class="row" style="margin-top:14px;align-items:center;gap:10px">
         <button class="btn primary" id="bsGo" disabled>⚡ Bootstrap</button>
@@ -1393,8 +1613,9 @@ async function viewAutolabel() {
         <button class="btn small ghost" data-mode="generic" title="SAM outlines every object without classes; you then give each one a class in the editor">Generic — outline everything, label later</button>
       </div>
       <div id="faGeneric" hidden>
-        <label class="fld">Generic phrases (comma-separated nouns SAM should look for)</label>
-        <input class="input" id="faPhrases" value="component, part, object">
+        <label class="fld">Generic phrases — comma-separated nouns naming the kind of thing in your images
+          (e.g. “car, truck, bus”; SAM 3 doesn't treat vehicles as an “object”)</label>
+        <input class="input" id="faPhrases" value="${esc(p.classes.length ? p.classes.map(c => c.name).join(", ") : "component, part, object")}">
         <p class="sub" style="margin:6px 0 0">Nothing is labeled automatically: every outlined object waits as a proposal. Open the
           editor on those images and YAAP asks for each object's class, one by one.</p>
       </div>
@@ -1537,25 +1758,31 @@ async function viewAutolabel() {
     if (!$("#bsModel").options.length)
       $("#bsModel").innerHTML = bs.models.map(m => `<option ${m === bs.default_model ? "selected" : ""}>${m}</option>`).join("");
     $("#bsEpochs").placeholder = `auto (${bs.auto_epochs})`;
+    $("#bsImgsz").placeholder = `auto (${bs.default_imgsz || 640})`;
     renderBsState();
     if (bs.last) renderBsRun(bs.last);
     if (bsActive(bs.last)) pollBootstrap(bs.last.id);
   }
   function renderBsState() {
     const refresh = $("#bsRefresh").checked, rejected = $("#bsRejected").checked, last = bs.last;
-    const targets = bs.unannotated + (refresh ? bs.unreviewed : 0) + (rejected ? bs.rejected : 0);
+    const other = $("#bsOther").checked;
+    const targets = bs.unannotated + (refresh ? bs.unreviewed + (other ? bs.other_unreviewed || 0 : 0) : 0) +
+      (rejected ? bs.rejected + (other ? bs.other_rejected || 0 : 0) : 0);
+    const otherN = (bs.other_unreviewed || 0) + (bs.other_rejected || 0);
     $("#bsStats").innerHTML = `
       <span><b>${bs.labeled}</b> labeled image${bs.labeled === 1 ? "" : "s"} to learn from${bs.background ? ` + ${bs.background} empty` : ""}</span>
       <span><b>${bs.unannotated}</b> unlabeled</span>
       ${bs.unreviewed ? `<span><b>${bs.unreviewed}</b> with unreviewed predictions${refresh ? " — get the new model's" : " — kept"}</span>` : ""}
       ${bs.rejected ? `<span><b>${bs.rejected}</b> rejected${rejected ? " — get the new model's" : " — kept for you to fix"}</span>` : ""}
+      ${otherN ? `<span><b>${otherN}</b> with predictions from SAM / Run a model${other && (refresh || rejected) ? " — get the new model's" : " — kept"}</span>` : ""}
       ${bs.new_since_last > 0 ? `<span class="ok">+${bs.new_since_last} labeled since the last round</span>` : ""}`;
     let hint = "", warn = false;
     if (bs.labeled < bs.min_labeled) { hint = `Label at least ${bs.min_labeled} images first`; warn = true; }
     else if (!targets) hint = "Nothing left to label";
     else if (bs.labeled < bs.recommended) { hint = `Works best with ${bs.recommended}+ labeled images`; warn = true; }
     else if (bs.few_examples?.length) {
-      hint = "Few examples of: " + bs.few_examples.map(c => `${c.name} (${c.count})`).join(", ") +
+      hint = (bs.task === "classify" ? "Classification needs ~20+ labeled images per class — few: " : "Few examples of: ") +
+        bs.few_examples.map(c => `${c.name} (${c.count})`).join(", ") +
         " — label a few more, or the model will confuse them";
       warn = true;
     }
@@ -1648,15 +1875,16 @@ async function viewAutolabel() {
       sel.value = keep;
     } catch (_) {}
   }
-  $("#bsRefresh").onchange = $("#bsRejected").onchange = () => { if (bs) renderBsState(); };
+  $("#bsRefresh").onchange = $("#bsRejected").onchange = $("#bsOther").onchange = () => { if (bs) renderBsState(); };
   $("#bsGo").onclick = async () => {
     const btn = $("#bsGo");
     btn.disabled = true;
     try {
       const r = await API.bootstrap(p.id, {
-        model_arch: $("#bsModel").value, epochs: +$("#bsEpochs").value || 0,
+        model_arch: $("#bsModel").value, epochs: +$("#bsEpochs").value || 0, imgsz: +$("#bsImgsz").value || 0,
         conf: +$("#bsConf").value || 0.4, refresh_unreviewed: $("#bsRefresh").checked,
-        relabel_rejected: $("#bsRejected").checked, max_overlap: +$("#bsOverlap").value || 0.7,
+        relabel_rejected: $("#bsRejected").checked, relabel_other_tools: $("#bsOther").checked,
+        max_overlap: +$("#bsOverlap").value || 0.7,
       });
       toast(`Bootstrap round ${r.round} started — training on ${r.train_images} labeled image(s).`, "ok");
       if (bs) bs.last = r;
@@ -1803,6 +2031,7 @@ async function viewGenerate() {
         <div style="flex:1"><label class="fld">Valid %</label><input class="input" id="spVal" type="number" value="20" min="0" max="100"></div>
         <div style="flex:1"><label class="fld">Test %</label><input class="input" id="spTest" type="number" value="10" min="0" max="100"></div>
       </div>
+      <div id="pinNote" class="sub" style="margin:8px 0 0" hidden></div>
       <h3 class="sect">Preprocess</h3>
       <div class="row">
         <div style="flex:1"><label class="fld">Resize (px, 0 = keep)</label><input class="input" id="ppSize" type="number" value="640"></div>
@@ -1841,6 +2070,27 @@ async function viewGenerate() {
         <button class="btn primary" id="verGo">⚙ Generate version</button>
       </div>
     </div></div>`;
+
+  // Images pinned to a split (an imported train/ valid/ test/ folder) keep it — the ratios only split the
+  // rest. An export with only train/ would otherwise give a version without val/test, silently.
+  async function renderPins() {
+    let ims = [];
+    try { ims = await API.images(p.id); } catch (_) { return; }
+    const pins = { train: 0, val: 0, test: 0 };
+    ims.forEach(im => { if (im.split in pins) pins[im.split]++; });
+    const n = pins.train + pins.val + pins.test, note = $("#pinNote");
+    if (!note) return;
+    note.hidden = !n;
+    if (!n) return;
+    note.innerHTML = `⚠ ${n} of ${ims.length} image(s) keep the split they were imported with
+      (train ${pins.train} · val ${pins.val} · test ${pins.test}) — these % only split the other ${ims.length - n}.
+      <button class="btn small ghost" id="pinClear">Re-split everything</button>`;
+    $("#pinClear").onclick = async () => {
+      if (!confirm(`Forget the imported split of ${n} image(s), so the % above apply to all images?`)) return;
+      try { await API.clearSplits(p.id); toast("Imported splits cleared.", "ok"); renderPins(); } catch (e) { err(e); }
+    };
+  }
+  renderPins();
 
   // Split %s always add up to 100: editing one rebalances the other two,
   // keeping their ratio to each other.
@@ -1986,11 +2236,14 @@ async function viewVersions() {
       const meta = v.status === "ready"
         ? `${st.format === "coco" ? "YOLO+COCO" : "YOLO"} · ${total} image(s) · train ${src.train ?? 0} (${pct(src.train ?? 0)}%) · ` +
           `val ${src.val ?? 0} (${pct(src.val ?? 0)}%) · test ${src.test ?? 0} (${pct(src.test ?? 0)}%)` +
-          (st.annotations != null ? ` · ${st.annotations} labels` : "") : (st.error || "");
+          (st.annotations != null ? ` · ${st.annotations} labels` : "") +
+          (st.tiny_dropped ? ` · ${st.tiny_dropped} label(s) too small after the resize, left out` : "") : (st.error || "");
+      const missing = [...(st.skipped || []), ...(st.bad_annotations || []).map(b => "broken label left out — " + b)];
       return `<div class="v-row">
         <span class="vname">${esc(v.name)}</span>
         <span class="pill ${v.status}">${v.status}</span>
         <span class="meta">${esc(meta)}</span>
+        ${missing.length ? `<span class="pill failed" title="${esc(missing.slice(0, 20).join("\n"))}">⚠ ${(st.skipped || []).length} not exported · ${(st.bad_annotations || []).length} broken label(s)</span>` : ""}
         ${v.status === "ready" ? `<button class="btn small" data-health="${v.id}" title="Dataset health statistics">♥ Health</button>` : ""}
         ${v.status === "ready" ? `<a class="btn small" href="${API.versionZip(p.id, v.id)}">⬇ zip</a>` : ""}
         <button class="btn ghost small" data-del="${v.id}">✕</button>
@@ -2130,10 +2383,12 @@ function collectTrainExtra(host) {
 
 /* ── train ────────────────────────────────────────────────────────── */
 async function viewTrain() {
+  const seq = S.navSeq;
   const p = S.project;
   let versions = [], models;
   try { [versions, models] = await Promise.all([API.versions(p.id), API.models(p.id, p.task_type)]); }
   catch (e) { return err(e); }
+  if (seq !== S.navSeq) return;
   const ready = versions.filter(v => v.status === "ready");
   const verOpts = ready.map(v => `<option value="${v.id}">${esc(v.name)}</option>`).join("")
     || `<option value="">No versions yet — use Generate</option>`;
@@ -2195,6 +2450,32 @@ async function viewTrain() {
         <h3 class="sect" style="margin-top:0">🔌 Remote GPU over SSH</h3>
         <p class="sub" style="margin-bottom:6px">Trains on another machine; log, stop and results stay here.
           Key-based auth only (no passwords) — hosts from <span class="mono">~/.ssh/config</span> work too.</p>
+        <details class="hp-details" id="sshHowto">
+          <summary>First-time setup — remote computer, SSH key, test</summary>
+          <div class="hp-body">
+            <p class="sub" style="margin:4px 0 4px"><b>1. On the remote (GPU) computer</b> — SSH server, then a Python
+              environment with PyTorch (CUDA) and ultralytics, and its IP address:</p>
+            <pre class="logbox ssh-howto">sudo apt update
+sudo apt install -y openssh-server rsync python3-venv
+sudo systemctl enable --now ssh
+python3 -m venv ~/yaap-env
+~/yaap-env/bin/pip install -U pip
+~/yaap-env/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+~/yaap-env/bin/pip install ultralytics
+~/yaap-env/bin/python -c "import torch; print(torch.cuda.is_available())"   # must print True
+hostname -I                                                                 # its IP address</pre>
+            <p class="sub" style="margin:10px 0 4px"><b>2. On this computer</b> (the one running YAAP) — a key
+              <i>without</i> a passphrase (YAAP can't type one), copied to the remote once (asks its password one last time):</p>
+            <pre class="logbox ssh-howto">ls ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+ssh-copy-id -i ~/.ssh/id_ed25519.pub user@192.168.x.x
+ssh -o BatchMode=yes user@192.168.x.x true && echo OK                       # must print OK, no password</pre>
+            <p class="sub" style="margin:10px 0 0"><b>3. Here</b> — fill <i>Host</i> (the IP) and <i>User</i>, leave
+              <i>Identity file</i> empty for <span class="mono">~/.ssh/id_ed25519</span>, then <b>Test connection</b>.
+              YAAP reads your <span class="mono">~/.ssh</span> folder (read-only) and remembers the remote's host key itself.
+              <i>Permission denied (publickey)</i> = the key wasn't copied, has a passphrase, or your user id isn't
+              1000 (see docker-compose.yml). Jetson: install PyTorch from NVIDIA's JetPack wheels instead of the pip line.</p>
+          </div>
+        </details>
         <div class="grid2">
           <div><label class="fld">Host</label><input class="input" id="sshHost" placeholder="192.168.1.50 or ssh-config alias"></div>
           <div><label class="fld">User</label><input class="input" id="sshUser"></div>
@@ -2500,10 +2781,12 @@ results = model.train(
 
 /* ── test model: run inference over a version's test-split images ──── */
 async function viewTestModel() {
+  const seq = S.navSeq;
   const p = S.project;
   let versions = [], models;
   try { [versions, models] = await Promise.all([API.versions(p.id), API.models(p.id, p.task_type)]); }
   catch (e) { return err(e); }
+  if (seq !== S.navSeq) return;
   const ready = versions.filter(v => v.status === "ready");
   const verOpts = ready.map(v => `<option value="${v.id}">${esc(v.name)}</option>`).join("")
     || `<option value="">No versions yet — use Generate</option>`;

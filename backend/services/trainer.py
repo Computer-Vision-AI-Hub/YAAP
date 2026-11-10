@@ -9,15 +9,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..config import BASE_DIR, RUNS_DIR
+from ..config import BASE_DIR, MODELS_DIR, RUNS_DIR
 from ..db import DatasetVersion, ModelWeight, Project, TrainJob
 from . import exporter, ssh_runner
 
 
 def start(db, project: Project, version: DatasetVersion, req) -> TrainJob:
-    from .inference import is_rtdetr_arch, resolve_weights
+    from .inference import KNOWN_ALIASES, is_rtdetr_arch, resolve_weights
     is_rtdetr = is_rtdetr_arch(req.model_arch, db)   # check before resolve_weights loses the alias
     arch = resolve_weights(req.model_arch, db)  # 'weight:<id>' → path on disk
+    if req.model_arch in KNOWN_ALIASES:         # keep the readable alias; the worker maps it to MODELS_DIR
+        arch = req.model_arch
     vdir = exporter.version_dir(project.id, version.id)
     if project.task_type == "classify":
         data = str(vdir)                       # classify: dataset root folder
@@ -54,15 +56,48 @@ def launch(db, job: TrainJob) -> TrainJob:
 
     # the child inherits its own copy of the descriptor, so ours can close now
     with open(log_path, "w") as log_file:
+        env, note = worker_env()
+        if note:
+            log_file.write(note + "\n"); log_file.flush()
         proc = subprocess.Popen(
             [sys.executable, "-m", "backend.services.train_worker", "--job", str(job.id)],
             cwd=str(BASE_DIR), stdout=log_file, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=True, env=env,
         )
     job.pid = proc.pid
     job.status = "running"
     db.commit()
     return job
+
+
+def _writable(d: Path) -> bool:
+    if d.exists():
+        return os.access(d, os.W_OK) and all(os.access(f, os.W_OK) for f in d.iterdir() if f.is_file())
+    return os.access(d.parent, os.W_OK)
+
+
+def worker_env() -> tuple[dict, str]:
+    """Environment for a training worker. ultralytics writes settings and downloads fonts (Arial.ttf,
+    checked by every dataset check) into $YOLO_CONFIG_DIR/Ultralytics; if that folder was created by
+    root (e.g. `docker compose exec` without `-u yaap`), training would crash with a PermissionError.
+    Then use a private, writable config folder for the worker instead (fonts already there are copied)."""
+    env = dict(os.environ)
+    cfg = Path(env.get("YOLO_CONFIG_DIR") or MODELS_DIR)
+    env.setdefault("YOLO_CONFIG_DIR", str(cfg))
+    udir = cfg / "Ultralytics"
+    if _writable(udir):
+        return env, ""
+    alt = RUNS_DIR / "ultralytics_config"
+    (alt / "Ultralytics").mkdir(parents=True, exist_ok=True)
+    for f in udir.glob("*.ttf") if udir.exists() else []:
+        try:
+            if not (alt / "Ultralytics" / f.name).exists():
+                shutil.copy2(f, alt / "Ultralytics" / f.name)
+        except OSError:
+            pass
+    env["YOLO_CONFIG_DIR"] = str(alt)
+    return env, (f"[yaap] {udir} is not writable (created by root? use `docker compose exec -u yaap …`); "
+                 f"this run keeps ultralytics' settings and fonts in {alt / 'Ultralytics'} instead.")
 
 
 def tail(job: TrainJob, lines: int = 80) -> str:
@@ -176,6 +211,8 @@ def refresh_status(db, job: TrainJob):
         if job.status == "running":
             job.status = "failed"
             db.commit()
+            from . import jobs
+            jobs.job_finished(db)     # a shutdown that waited for this job can go ahead
     return job
 
 

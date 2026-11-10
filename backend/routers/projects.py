@@ -1,12 +1,10 @@
-import shutil
-
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import case, exists, func, or_
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session, selectinload
 
-from ..db import Annotation, DatasetVersion, ImageAsset, LabelClass, Project, get_db
+from ..db import DatasetVersion, ImageAsset, LabelClass, Project, get_db, next_class_index
 from ..schemas import ClassCreate, ClassUpdate, ProjectCreate
-from ..services import storage
+from ..services import cleanup, storage
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -21,17 +19,23 @@ def project_or_404(db: Session, pid: int) -> Project:
     return p
 
 
+# "labeled" = a person has done or checked it; model output nobody has looked at yet,
+# and rejected images waiting for a fix, don't count (see DOCUMENTATION.md §6.3)
+LABELED_STATUSES = ("annotated", "approved", "empty")
+PREDICTED_STATUSES = ("auto-annotated", "review")
+
+
 def _project_counts(db: Session, pids: list[int]) -> dict[int, dict]:
     """Per-project image/labeled/version counts, aggregated in SQL — a fixed
     number of queries no matter how many projects or images there are."""
-    out = {pid: {"images": 0, "annotated": 0, "versions": 0} for pid in pids}
-    labeled = or_(ImageAsset.status.in_(("annotated", "empty")),
-                  exists().where(Annotation.image_id == ImageAsset.id))
-    for pid, n, n_ann in (db.query(ImageAsset.project_id, func.count(ImageAsset.id),
-                                   func.sum(case((labeled, 1), else_=0)))
-                          .filter(ImageAsset.project_id.in_(pids))
-                          .group_by(ImageAsset.project_id)):
-        out[pid].update(images=n, annotated=int(n_ann or 0))
+    out = {pid: {"images": 0, "annotated": 0, "predicted": 0, "versions": 0} for pid in pids}
+    labeled = case((ImageAsset.status.in_(LABELED_STATUSES), 1), else_=0)
+    predicted = case((ImageAsset.status.in_(PREDICTED_STATUSES), 1), else_=0)
+    for pid, n, n_lab, n_pred in (db.query(ImageAsset.project_id, func.count(ImageAsset.id),
+                                           func.sum(labeled), func.sum(predicted))
+                                  .filter(ImageAsset.project_id.in_(pids))
+                                  .group_by(ImageAsset.project_id)):
+        out[pid].update(images=n, annotated=int(n_lab or 0), predicted=int(n_pred or 0))
     for pid, n in (db.query(DatasetVersion.project_id, func.count(DatasetVersion.id))
                    .filter(DatasetVersion.project_id.in_(pids))
                    .group_by(DatasetVersion.project_id)):
@@ -44,6 +48,7 @@ def serialize_projects(db: Session, projects: list[Project]) -> list[dict]:
     return [{"id": p.id, "name": p.name, "description": p.description,
              "task_type": p.task_type, "created_at": p.created_at.isoformat(),
              "image_count": counts[p.id]["images"], "annotated_count": counts[p.id]["annotated"],
+             "predicted_count": counts[p.id]["predicted"],
              "class_count": len(p.classes), "version_count": counts[p.id]["versions"],
              "classes": [serialize_class(c) for c in p.classes]} for p in projects]
 
@@ -75,9 +80,7 @@ def get_project(pid: int, db: Session = Depends(get_db)):
 
 @router.delete("/{pid}")
 def delete_project(pid: int, db: Session = Depends(get_db)):
-    p = project_or_404(db, pid)
-    shutil.rmtree(storage.project_dir(pid), ignore_errors=True)
-    db.delete(p); db.commit()
+    cleanup.delete_project(db, project_or_404(db, pid))
     return {"ok": True}
 
 
@@ -91,7 +94,7 @@ def add_class(pid: int, body: ClassCreate, db: Session = Depends(get_db)):
     if any(c.name == name for c in p.classes):
         raise HTTPException(409, f"Class '{name}' already exists")
     color = body.color or PALETTE[len(p.classes) % len(PALETTE)]
-    c = LabelClass(project_id=pid, name=name, color=color, order_idx=len(p.classes))
+    c = LabelClass(project_id=pid, name=name, color=color, order_idx=next_class_index(db, pid))
     db.add(c); db.commit()
     return serialize_class(c)
 
@@ -102,7 +105,11 @@ def update_class(pid: int, cid: int, body: ClassUpdate, db: Session = Depends(ge
     if not c or c.project_id != pid:
         raise HTTPException(404, "Class not found")
     if body.name is not None:
-        c.name = body.name.strip() or c.name
+        name = body.name.strip() or c.name
+        if name != c.name and db.query(LabelClass).filter(LabelClass.project_id == pid, LabelClass.id != cid,
+                                                          LabelClass.name == name).first():
+            raise HTTPException(409, f"Class '{name}' already exists")
+        c.name = name
     if body.color is not None:
         c.color = body.color
     db.commit()

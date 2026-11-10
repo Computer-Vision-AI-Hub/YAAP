@@ -1,7 +1,8 @@
 """Pydantic request/response schemas."""
+import math
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProjectCreate(BaseModel):
@@ -26,10 +27,39 @@ class AnnotationIn(BaseModel):
     data: dict[str, Any] = {}
     source: str = "manual"
     confidence: float = 1.0
+    origin: str = Field("", max_length=32)
+
+    @model_validator(mode="after")
+    def _geometry(self):
+        """Refuse shapes no exporter can write (a bbox without x/y/w/h broke the whole project's export)."""
+        d = self.data or {}
+        if self.kind == "bbox":
+            try:
+                x, y, w, h = (float(d[k]) for k in ("x", "y", "w", "h"))
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("a bbox needs numeric x, y, w and h")
+            if not all(math.isfinite(v) for v in (x, y, w, h)) or w <= 0 or h <= 0:
+                raise ValueError("a bbox needs finite x, y and w, h > 0")
+            self.data = {"x": x, "y": y, "w": w, "h": h}
+        elif self.kind == "polygon":
+            pts = d.get("points")
+            try:
+                pts = [[float(q[0]), float(q[1])] for q in pts]
+            except (TypeError, ValueError, IndexError):
+                raise ValueError("polygon points must be [x, y] pairs")
+            if len(pts) < 3 or not all(math.isfinite(v) for q in pts for v in q):
+                raise ValueError("a polygon needs at least 3 finite points")
+            self.data = {"points": pts}
+        else:
+            self.data = {}
+        return self
 
 
 class AnnotationsReplace(BaseModel):
     annotations: list[AnnotationIn]
+    # the ids the client last loaded/saved: 409 if the image now holds others (a job wrote predictions,
+    # or another tab saved), so a stale editor can't silently delete them. None = no check.
+    expect_ids: Optional[list[int]] = None
 
 
 class ImagePatch(BaseModel):
@@ -107,10 +137,11 @@ class SshSettings(BaseModel):
 class BootstrapRequest(BaseModel):
     model_arch: str = ""                       # empty = yolo11n for the project's task
     epochs: int = Field(0, ge=0, le=500)       # 0 = auto: more passes for fewer images
-    imgsz: int = Field(640, ge=64, le=2048)
+    imgsz: int = Field(0, ge=0, le=2048)       # 0 = the task's default: 640, or 224 for classification
     conf: float = Field(0.4, gt=0, lt=1)
     iou: float = Field(0.5, gt=0, lt=1)
     device: str = "auto"
     refresh_unreviewed: bool = True            # also re-label images holding only unreviewed predictions
     relabel_rejected: bool = True              # … and rejected ones whose boxes all came from a model
+    relabel_other_tools: bool = False          # … even when those predictions came from SAM / Run a model
     max_overlap: float = Field(0.7, gt=0, le=1)   # one box per object, see InferenceRequest

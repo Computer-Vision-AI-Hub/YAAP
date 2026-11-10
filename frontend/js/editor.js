@@ -23,11 +23,16 @@ class Editor {
     this.samBox = null;               // {x0,y0,x1,y1} while dragging / committed
     this.samPending = [];             // [{polygon:[[x,y]..], score, label}]
     this._samDown = null;
+    // undo / redo: JSON snapshots of this.anns taken just before each change, kept per image
+    this.history = []; this.future = []; this._histories = new Map(); this._histKey = null;
     this._bind();
   }
 
   /* ── lifecycle ─────────────────────────────────────────────────── */
-  load(imgEl, anns) {
+  load(imgEl, anns, key = null) {
+    if (this._histKey != null) this._histories.set(this._histKey, { history: this.history, future: this.future });
+    const h = key != null && this._histories.get(key);
+    this.history = h ? h.history : []; this.future = h ? h.future : []; this._histKey = key;
     this.img = imgEl;
     this.anns = anns.map(a => ({ ...a }));
     this.sel = -1; this.draft = null; this.poly = null; this.drag = null;
@@ -35,6 +40,52 @@ class Editor {
     this.clearSam(false);
     this.fit();
   }
+
+  /* ── undo / redo ───────────────────────────────────────────────── */
+  // call right BEFORE changing this.anns; returns whether a step was recorded
+  checkpoint() {
+    const s = JSON.stringify(this.anns);
+    if (this.history[this.history.length - 1] === s) return false;
+    this.history.push(s);
+    if (this.history.length > 100) this.history.shift();
+    this._futureBefore = this.future;
+    this.future = [];
+    this._histChanged();
+    return true;
+  }
+  // a gesture (drag, click) that turned out to change nothing leaves no step behind
+  _dropIfUnchanged(recorded) {
+    if (recorded && this.history[this.history.length - 1] === JSON.stringify(this.anns)) {
+      this.history.pop(); this.future = this._futureBefore || []; this._histChanged();
+    }
+  }
+  canUndo() { return !!(this.poly && this.poly.length) || this.history.length > 0; }
+  canRedo() { return this.future.length > 0; }
+  undo() {
+    if (this.poly && this.poly.length) {            // drawing a polygon: take back the last point
+      this.poly.pop(); if (!this.poly.length) this.poly = null;
+      this.draw(); this._histChanged(); return true;
+    }
+    if (!this.history.length) return false;
+    this.future.push(JSON.stringify(this.anns));
+    this._restore(this.history.pop());
+    return true;
+  }
+  redo() {
+    if (!this.future.length) return false;
+    this.history.push(JSON.stringify(this.anns));
+    this._restore(this.future.pop());
+    return true;
+  }
+  _restore(snapshot) {
+    this.anns = JSON.parse(snapshot);
+    this.pendingShape = null; this.drag = null;
+    this.select(-1);
+    this._dirty();
+    this._histChanged();
+    this.draw();
+  }
+  _histChanged() { this.opts.onHistory && this.opts.onHistory(this); }
 
   fit() {
     if (!this.img) return;
@@ -45,6 +96,20 @@ class Editor {
     this.view.s = s;
     this.view.tx = (r.width - this.img.width * s) / 2;
     this.view.ty = (r.height - this.img.height * s) / 2;
+    this.draw();
+  }
+
+  // the canvas got a new size (window resize, devtools…): keep the zoom, keep the same image point in the middle
+  _resize() {
+    if (!this.img) return;
+    const r = this.cv.getBoundingClientRect();
+    const ow = this.cv.width / devicePixelRatio, oh = this.cv.height / devicePixelRatio;
+    if (!ow || !oh || !r.width || !r.height) return this.fit();
+    if (Math.abs(r.width - ow) < 0.5 && Math.abs(r.height - oh) < 0.5) return;
+    this.cv.width = r.width * devicePixelRatio;
+    this.cv.height = r.height * devicePixelRatio;
+    this.view.tx += (r.width - ow) / 2;
+    this.view.ty += (r.height - oh) / 2;
     this.draw();
   }
 
@@ -93,7 +158,7 @@ class Editor {
     window.addEventListener("mouseup", e => this._up(e), { signal });
     window.addEventListener("keydown", e => this._key(e), { signal });
     window.addEventListener("keyup", e => { if (e.code === "Space") this.spaceHeld = false; }, { signal });
-    this._ro = new ResizeObserver(() => this.fit());
+    this._ro = new ResizeObserver(() => this._resize());   // keep zoom/pan; fit() only on a new image
     this._ro.observe(cv.parentElement);
   }
 
@@ -130,21 +195,30 @@ class Editor {
       this.samBox = null;
       return;
     }
+    if (this.pendingShape && (this.tool === "bbox" || (this.tool === "polygon" && !this.poly))) {
+      const c = this.opts.getActiveClass && this.opts.getActiveClass();
+      if (!c) { this.draw(); return; }               // its class picker is up: pick a class (or Esc) first
+      this.assignPendingClass(c.id);
+    }
     if (this.tool === "bbox") {
       this.draft = { x0: ix, y0: iy, x1: ix, y1: iy };
     } else if (this.tool === "polygon") {
       if (!this.poly) this.poly = [];
+      // the 2nd mousedown of a double-click (which closes the polygon) must not add the last point twice
+      if (e.detail > 1 && this.poly.length) return;
       // close when clicking near first vertex
       if (this.poly.length >= 3) {
         const [fx, fy] = this.toScr(this.poly[0][0], this.poly[0][1]);
         if (Math.hypot(sx - fx, sy - fy) < 12) { this._closePoly(); return; }
       }
       this.poly.push([this._clampX(ix), this._clampY(iy)]);
+      this._histChanged();                            // a point can be taken back with Ctrl+Z
     } else if (this.tool === "select") {
       // 1) handle of selected bbox / vertex of selected polygon
       if (this.sel >= 0) {
         const h = this._hitHandle(sx, sy);
         if (h) {
+          this._gesture = this.checkpoint();
           this.drag = h;
           if (h.mode === "vertex") Object.assign(this.drag, { downSx: sx, downSy: sy, moved: false });
           return;
@@ -155,6 +229,7 @@ class Editor {
         if (a && a.kind === "polygon") {
           const at = this._hitEdge(sx, sy);
           if (at !== null) {
+            this._gesture = this.checkpoint();
             a.data.points.splice(at, 0, [this._clampX(ix), this._clampY(iy)]);
             this.drag = { mode: "vertex", i: at, downSx: sx, downSy: sy, moved: false, inserted: true };
             this._dirty();
@@ -163,11 +238,12 @@ class Editor {
           }
         }
       }
-      // 2) annotation body (topmost first)
-      const hit = this._hitAnn(ix, iy);
+      // 2) annotation body: the smallest one under the cursor (Alt-click cycles through a stack)
+      const hit = this._hitAnn(ix, iy, e.altKey);
       this.select(hit);
       if (hit >= 0) {
         const a = this.anns[hit];
+        this._gesture = this.checkpoint();
         this.drag = { mode: "move", ix, iy, orig: JSON.parse(JSON.stringify(a.data)) };
       }
     }
@@ -189,12 +265,12 @@ class Editor {
         } else if (a.kind === "polygon") {
           a.data.points = d.orig.points.map(p => [p[0] + dx, p[1] + dy]);
         }
-        this._dirty();
+        d.changed = true;             // reported once, on mouseup — not on every mousemove (slow on dense images)
       } else if (d.mode === "handle") {
-        this._resizeBBox(this.anns[this.sel].data, d.h, ix, iy); this._dirty();
+        this._resizeBBox(this.anns[this.sel].data, d.h, ix, iy); d.changed = true;
       } else if (d.mode === "vertex") {
         if (!d.moved && Math.hypot(sx - d.downSx, sy - d.downSy) > 4) d.moved = true;
-        this.anns[this.sel].data.points[d.i] = [this._clampX(ix), this._clampY(iy)]; this._dirty();
+        this.anns[this.sel].data.points[d.i] = [this._clampX(ix), this._clampY(iy)]; d.changed = true;
       }
     } else if (this.draft) {
       this.draft.x1 = ix; this.draft.y1 = iy;
@@ -224,13 +300,14 @@ class Editor {
     }
     if (this.draft) {
       const d = this.draft;
-      const x = Math.min(d.x0, d.x1), y = Math.min(d.y0, d.y1);
-      const w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
+      // clip to the image on every side (clamping only x/y kept the part dragged outside the left/top edge)
+      const x = this._clampX(Math.min(d.x0, d.x1)), x2 = this._clampX(Math.max(d.x0, d.x1));
+      const y = this._clampY(Math.min(d.y0, d.y1)), y2 = this._clampY(Math.max(d.y0, d.y1));
+      const w = x2 - x, h = y2 - y;
       this.draft = null;
-      if (w > 4 && h > 4) {
-        this.pendingShape = { kind: "bbox",
-          data: { x: this._clampX(x), y: this._clampY(y),
-                  w: Math.min(w, this.img.width - x), h: Math.min(h, this.img.height - y) },
+      // a drag of more than 4 SCREEN pixels makes a box — at high zoom that allows 1–4 px objects
+      if (w > 0 && h > 0 && w * this.view.s > 4 && h * this.view.s > 4) {
+        this.pendingShape = { kind: "bbox", data: { x, y, w, h },
           anchor: [this._clampX(d.x1), this._clampY(d.y1)] };   // near where the mouse was released
         this.opts.onPendingShape && this.opts.onPendingShape(this);
       }
@@ -243,17 +320,28 @@ class Editor {
         if (a && a.data.points.length > 3) { a.data.points.splice(this.drag.i, 1); this._dirty(); }
       }
       this.drag = null;
+      this._dropIfUnchanged(this._gesture); this._gesture = false;
       this.draw();
       return;
     }
-    if (this.drag && this.drag.mode !== "pan") this._normalizeSel();
+    if (this.drag && this.drag.mode !== "pan") {
+      this._normalizeSel(this.drag.mode);
+      if (this.drag.changed) this._dirty();
+    }
     this.drag = null;
+    this._dropIfUnchanged(this._gesture); this._gesture = false;
     this.draw();
   }
 
   _key(e) {
     if (e.target.matches("input,textarea,select") || !this.img) return;
     const k = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && (k === "z" || k === "y")) {
+      e.preventDefault();
+      if (k === "y" || e.shiftKey) this.redo(); else this.undo();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) return;               // leave other shortcuts (copy, reload…) to the browser
     if (k === "v") this.opts.onToolKey("select");
     else if (k === "b") this.opts.onToolKey("bbox");
     else if (k === "p") this.opts.onToolKey("polygon");
@@ -264,14 +352,19 @@ class Editor {
     else if (e.code === "Space") { this.spaceHeld = true; e.preventDefault(); }
     else if (k === "enter" && this.poly) this._closePoly();
     else if (k === "enter" && this.samPending.length) { this.opts.onSamAccept && this.opts.onSamAccept(); }
+    else if (k === "enter" && this.pendingShape) {            // Enter = the active class
+      const c = this.opts.getActiveClass && this.opts.getActiveClass();
+      if (c) this.assignPendingClass(c.id);
+    }
     else if (k === "escape") {
       if (this.samPts.length || this.samBox || this.samPending.length) this.clearSam();
       else if (this.pendingShape) this.discardPendingShape();
       else { this.poly = null; this.draft = null; this.select(-1); }
     }
     else if ((k === "delete" || k === "backspace") && this.sel >= 0) {
+      this.checkpoint();
       this.anns.splice(this.sel, 1); this.select(-1); this._dirty();
-    } else if (/^[1-9]$/.test(k)) this.opts.onClassKey(+k - 1);
+    } else if (/^[0-9]$/.test(k)) this.opts.onClassKey(k === "0" ? 9 : +k - 1);
     this.draw();
   }
 
@@ -291,6 +384,7 @@ class Editor {
   assignPendingClass(classId) {
     if (!this.pendingShape) return;
     const { kind, data } = this.pendingShape;
+    this.checkpoint();
     this.anns.push({ class_id: classId, kind, source: "manual", confidence: 1, data });
     this.pendingShape = null;
     this.select(-1);
@@ -306,15 +400,23 @@ class Editor {
   }
 
   /* ── hit testing / geometry ────────────────────────────────────── */
-  _hitAnn(ix, iy) {
-    for (let i = this.anns.length - 1; i >= 0; i--) {
+  // The smallest shape under the point: on dense images boxes overlap a lot, and "the last one drawn"
+  // left a third of them unselectable. A selected shape under the point stays selected (so it can be
+  // dragged); with cycle (Alt-click) the next larger one under the point is picked instead.
+  _hitAnn(ix, iy, cycle = false) {
+    const hits = [];
+    for (let i = 0; i < this.anns.length; i++) {
       const a = this.anns[i];
       if (a.kind === "bbox") {
         const d = a.data;
-        if (ix >= d.x && ix <= d.x + d.w && iy >= d.y && iy <= d.y + d.h) return i;
-      } else if (a.kind === "polygon" && this._inPoly(ix, iy, a.data.points)) return i;
+        if (ix >= d.x && ix <= d.x + d.w && iy >= d.y && iy <= d.y + d.h) hits.push([i, d.w * d.h]);
+      } else if (a.kind === "polygon" && this._inPoly(ix, iy, a.data.points)) hits.push([i, polyArea(a.data.points)]);
     }
-    return -1;
+    if (!hits.length) return -1;
+    hits.sort((p, q) => p[1] - q[1] || q[0] - p[0]);       // smallest first; a tie → the one drawn on top
+    const at = hits.findIndex(h => h[0] === this.sel);
+    if (at >= 0) return cycle ? hits[(at + 1) % hits.length][0] : this.sel;
+    return hits[0][0];
   }
 
   _inPoly(x, y, pts) {
@@ -336,6 +438,8 @@ class Editor {
     const a = this.anns[this.sel];
     if (!a) return null;
     if (a.kind === "bbox") {
+      const [x0, y0] = this.toScr(a.data.x, a.data.y), [x1, y1] = this.toScr(a.data.x + a.data.w, a.data.y + a.data.h);
+      if ((x1 - x0 < 24 || y1 - y0 < 24) && sx > x0 && sx < x1 && sy > y0 && sy < y1) return null;   // grab = move
       for (const [h, hx, hy] of this._handles(a.data)) {
         const [px, py] = this.toScr(hx, hy);
         if (Math.hypot(sx - px, sy - py) < 8) return { mode: "handle", h };
@@ -380,16 +484,22 @@ class Editor {
     if (h.includes("s")) { d.h = iy - d.y; }
   }
 
-  _normalizeSel() {
+  _normalizeSel(mode = "") {
     const a = this.anns[this.sel];
     if (!a) return;
     if (a.kind === "bbox") {
-      const d = a.data;
+      const d = a.data, W = this.img.width, H = this.img.height;
       if (d.w < 0) { d.x += d.w; d.w = -d.w; }
       if (d.h < 0) { d.y += d.h; d.h = -d.h; }
-      d.x = this._clampX(d.x); d.y = this._clampY(d.y);
-      d.w = Math.max(2, Math.min(d.w, this.img.width - d.x));
-      d.h = Math.max(2, Math.min(d.h, this.img.height - d.y));
+      if (mode === "move") {                    // a moved box slides back inside, keeping its size
+        d.w = Math.min(d.w, W); d.h = Math.min(d.h, H);
+        d.x = Math.min(Math.max(d.x, 0), W - d.w); d.y = Math.min(Math.max(d.y, 0), H - d.h);
+        return;
+      }
+      // a resized one is clipped on every side (clamping only x/y kept the part past the left/top edge)
+      const x1 = this._clampX(d.x), x2 = this._clampX(d.x + d.w), y1 = this._clampY(d.y), y2 = this._clampY(d.y + d.h);
+      d.x = Math.min(x1, W - 1); d.y = Math.min(y1, H - 1);
+      d.w = Math.max(1, x2 - d.x); d.h = Math.max(1, y2 - d.y);
     }
   }
 
@@ -581,4 +691,10 @@ function pointInPoly(x, y, poly) {
     if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
   }
   return inside;
+}
+
+function polyArea(pts) {
+  let a = 0;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) a += (pts[j][0] + pts[i][0]) * (pts[j][1] - pts[i][1]);
+  return Math.abs(a / 2);
 }

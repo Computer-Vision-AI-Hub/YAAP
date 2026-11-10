@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import random
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -16,10 +17,30 @@ from ..db import Annotation, DatasetVersion, ImageAsset, LabelClass, Project
 from . import augmenter, storage
 
 
-def _ann_dicts(image: ImageAsset) -> list[dict]:
+def _valid_geometry(kind: str, d: dict) -> bool:
+    """A shape every writer can handle (old rows may predate the API's validation)."""
+    try:
+        if kind == "bbox":
+            return float(d["w"]) > 0 and float(d["h"]) > 0 and float(d["x"]) == float(d["x"]) \
+                and float(d["y"]) == float(d["y"])
+        if kind == "polygon":
+            pts = d.get("points") or []
+            return len(pts) >= 3 and all(len(q) >= 2 and float(q[0]) == float(q[0]) for q in pts)
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _ann_dicts(image: ImageAsset, bad: list | None = None) -> list[dict]:
+    """The image's annotations as plain dicts; broken shapes are left out (and listed in `bad`)."""
     out = []
     for a in image.annotations:
-        out.append({"kind": a.kind, "class_id": a.class_id, "data": a.data_obj,
+        d = a.data_obj
+        if not _valid_geometry(a.kind, d):
+            if bad is not None:
+                bad.append(f"{image.filename}: {a.kind} {json.dumps(d)[:80]}")
+            continue
+        out.append({"kind": a.kind, "class_id": a.class_id, "data": d,
                     "confidence": a.confidence})
     return out
 
@@ -142,23 +163,31 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
     source_counts = {s: len(ims) for s, ims in split_map.items()}  # distinct source images
     coco_entries: dict[str, list] = {s: [] for s in split_map}     # coco only: (stem, w, h, anns)
     ann_count = 0
+    skipped: list[str] = []          # images (or augmented copies) that could not be written, and why
+    written_ids: dict[str, list[int]] = {s: [] for s in split_map}   # which image went to which split
+    bad_anns: list[str] = []         # broken shapes left out
+    tiny_dropped, tiny_images = 0, []  # labels too small to survive the resize (reported, not an error)
     augmenter.seed_everything(1337)
+    # folder per split: COCO-format versions use Roboflow's names (train/ valid/ test/ — RF-DETR and other COCO
+    # tools read validation from valid/_annotations.coco.json); YOLO-only versions keep ultralytics' val/
+    folder = {"train": "train", "val": "valid" if fmt == "coco" else "val", "test": "test"}
 
     for split, ims in split_map.items():
         if not ims:
             continue
+        sdir = out_dir / folder[split]
         if task == "classify":
-            (out_dir / split).mkdir(parents=True, exist_ok=True)
+            (sdir).mkdir(parents=True, exist_ok=True)
         else:
-            (out_dir / split / "images").mkdir(parents=True, exist_ok=True)
-            (out_dir / split / "labels").mkdir(parents=True, exist_ok=True)
+            (sdir / "images").mkdir(parents=True, exist_ok=True)
+            (sdir / "labels").mkdir(parents=True, exist_ok=True)
 
         for im in ims:
             src = storage.image_path(project.id, im.filename)
             if not src.exists():
                 continue
             img = augmenter.load_bgr(str(src))
-            anns = _ann_dicts(im)
+            anns = _ann_dicts(im, bad_anns)
             variants = [(pre, 0)]
             if aug is not None and split == "train":     # augment training split only
                 variants += [(aug, k + 1) for k in range(multiplier - 1)]
@@ -166,32 +195,42 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
             for pipeline, k in variants:
                 try:
                     out_img, out_anns = augmenter.apply(pipeline, img, anns)
-                except Exception:
+                except Exception as e:      # never silently: the version reports what is missing
+                    skipped.append(f"{im.filename}{f' (augmented copy {k})' if k else ''}: {e}"[:300])
                     continue
+                if k == 0 and task != "classify" and len(out_anns) < len(anns):
+                    # e.g. 4-px objects in a 2000-px photo resized to 640: under albumentations' 4 px² minimum
+                    tiny_dropped += len(anns) - len(out_anns)
+                    if len(tiny_images) < 20:
+                        tiny_images.append(im.filename)
                 stem = f"{Path(im.filename).stem}_{im.id}" + (f"_aug{k}" if k else "")
                 if task == "classify":
                     tag = next((a for a in out_anns if a["kind"] == "classification"), None)
                     cname = class_name.get(tag["class_id"], "_unlabeled") if tag else "_unlabeled"
-                    cdir = out_dir / split / cname
+                    cdir = sdir / cname
                     cdir.mkdir(parents=True, exist_ok=True)
                     cv2.imwrite(str(cdir / f"{stem}.jpg"), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    ann_count += 1 if tag else 0
                 else:
                     oh, ow = out_img.shape[:2]
-                    cv2.imwrite(str(out_dir / split / "images" / f"{stem}.jpg"), out_img,
+                    cv2.imwrite(str(sdir / "images" / f"{stem}.jpg"), out_img,
                                 [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    _write_label_txt(out_dir / split / "labels" / f"{stem}.txt",
+                    _write_label_txt(sdir / "labels" / f"{stem}.txt",
                                      out_anns, class_idx, ow, oh, task)
                     ann_count += len(out_anns)
                     if fmt == "coco":                     # parallel Roboflow-style layout
-                        cv2.imwrite(str(out_dir / split / f"{stem}.jpg"), out_img,
+                        cv2.imwrite(str(sdir / f"{stem}.jpg"), out_img,
                                     [cv2.IMWRITE_JPEG_QUALITY, 95])
                         coco_entries[split].append((stem, ow, oh, out_anns))
                 counts[split] += 1
+                if k == 0:
+                    written_ids[split].append(im.id)
 
     if task != "classify":
+        # no `path:` — ultralytics then resolves the splits next to data.yaml, so the downloaded zip
+        # trains as-is anywhere (an absolute /app/data/... path only exists inside YAAP's container)
         data_yaml = {
-            "path": str(out_dir.resolve()),
-            "train": "train/images", "val": "val/images",
+            "train": "train/images", "val": f"{folder['val']}/images",
             "names": {i: c.name for i, c in enumerate(classes)},
         }
         if counts.get("test"):
@@ -203,7 +242,7 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
     if fmt == "coco":
         for split, entries in coco_entries.items():
             if entries:
-                _write_coco_json(out_dir / split / "_annotations.coco.json", entries, classes, class_idx)
+                _write_coco_json(out_dir / folder[split] / "_annotations.coco.json", entries, classes, class_idx)
 
     zip_path = out_dir.with_suffix(".zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -213,15 +252,39 @@ def generate(db, project: Project, version: DatasetVersion) -> dict:
 
     return {"images": counts, "source_images": source_counts,
             "source_images_total": sum(source_counts.values()), "format": fmt,
-            "annotations": ann_count, "classes": [c.name for c in classes], "path": str(out_dir)}
+            "annotations": ann_count, "classes": [c.name for c in classes], "path": str(out_dir),
+            "skipped": skipped, "bad_annotations": bad_anns, "split_ids": written_ids,
+            "tiny_dropped": tiny_dropped, "tiny_dropped_images": tiny_images}
 
 
 def version_dir(project_id: int, version_id: int) -> Path:
     return storage.project_dir(project_id) / "versions" / f"v{version_id}"
 
 
+def split_image_ids(version: DatasetVersion, split: str = "test") -> list[int]:
+    """Image ids a version put in `split`, as built — not re-derived from the project's current images
+    (any approval/upload since then reshuffles a fresh split). New versions store them in stats; older
+    ones are read back from the exported file names (<stem>_<image id>[_aug<k>].jpg)."""
+    import re
+    stats = json.loads(version.stats or "{}")
+    if isinstance(stats.get("split_ids"), dict):
+        return list(stats["split_ids"].get(split, []))
+    ids: set[int] = set()
+    d = version_dir(version.project_id, version.id) / split
+    if split == "val" and not d.exists():
+        d = d.parent / "valid"
+    for f in d.rglob("*") if d.exists() else []:
+        if f.suffix.lower() in (".jpg", ".jpeg", ".png") and "labels" not in f.parts:
+            m = re.search(r"_(\d+)(?:_aug\d+)?$", f.stem)
+            if m:
+                ids.add(int(m.group(1)))
+    return sorted(ids)
+
+
 def export_raw(project: Project, approved_only: bool = False) -> Path:
-    """Pack the project's current images + annotations as-is."""
+    """Pack the project's current images + annotations as-is. Every call works in its own temporary
+    folder (two downloads at once used to delete each other's files); the caller deletes the returned
+    zip's folder after sending it (see remove_export)."""
     classes: list[LabelClass] = list(project.classes)
     class_idx = {c.id: i for i, c in enumerate(classes)}
     class_name = {c.id: c.name for c in classes}
@@ -234,10 +297,10 @@ def export_raw(project: Project, approved_only: bool = False) -> Path:
         raise RuntimeError("No approved images to export." if approved_only
                            else "No images to export — upload something first.")
 
-    out_dir = storage.project_dir(project.id) / "_raw_export"
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
-    out_dir.mkdir(parents=True)
+    work = Path(tempfile.mkdtemp(prefix="_raw_export_", dir=storage.project_dir(project.id)))
+    out_dir = work / "pack"
+    out_dir.mkdir()
+    used_stems: set[str] = set()     # same.jpg + same.png must not share labels/same.txt
 
     if task != "classify":
         (out_dir / "images").mkdir()
@@ -255,21 +318,30 @@ def export_raw(project: Project, approved_only: bool = False) -> Path:
             cdir.mkdir(parents=True, exist_ok=True)
             shutil.copy(src, cdir / im.filename)
         else:
-            shutil.copy(src, out_dir / "images" / im.filename)
-            _write_label_txt(out_dir / "labels" / f"{Path(im.filename).stem}.txt",
+            stem, ext = Path(im.filename).stem, Path(im.filename).suffix
+            if stem in used_stems:
+                stem = f"{stem}_{im.id}"
+            used_stems.add(stem)
+            shutil.copy(src, out_dir / "images" / f"{stem}{ext}")
+            _write_label_txt(out_dir / "labels" / f"{stem}.txt",
                              anns, class_idx, im.width, im.height, task)
 
+    # the class list (its order is the export index) — also for classification, so a re-import keeps the order
+    (out_dir / "classes.txt").write_text("\n".join(c.name for c in classes))
     if task != "classify":
-        (out_dir / "classes.txt").write_text("\n".join(c.name for c in classes))
-        data_yaml = {"path": str(out_dir.resolve()), "train": "images", "val": "images",
+        data_yaml = {"train": "images", "val": "images",       # relative to data.yaml, see generate()
                      "names": {i: c.name for i, c in enumerate(classes)}}
         (out_dir / "data.yaml").write_text(yaml.safe_dump(data_yaml, sort_keys=False))
 
-    zip_path = out_dir.with_suffix(".zip")
-    zip_path.unlink(missing_ok=True)
+    zip_path = work / "export.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in out_dir.rglob("*"):
             if f.is_file():
                 zf.write(f, f.relative_to(out_dir))
     shutil.rmtree(out_dir)
     return zip_path
+
+
+def remove_export(zip_path: Path):
+    """Delete a raw export's temporary folder (after the response has been sent)."""
+    shutil.rmtree(Path(zip_path).parent, ignore_errors=True)

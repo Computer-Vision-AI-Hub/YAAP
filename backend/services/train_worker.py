@@ -76,7 +76,9 @@ def main():
         job.status = "running"
         db.commit()
 
-        model = ModelCls(job.model_arch)
+        from backend.services.inference import alias_path, use_models_dir
+        use_models_dir()                             # preloaded weights in data/models are found offline
+        model = ModelCls(alias_path(job.model_arch))
         if bootstrap_run:
             from backend.services import bootstrap
             bootstrap.track_epochs(model, db, bootstrap_run)

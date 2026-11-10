@@ -39,9 +39,11 @@ const API = {
 
   // annotations
   annotations:  (pid, iid)     => API._j(`/api/projects/${pid}/images/${iid}/annotations`),
-  saveAnnotations: (pid, iid, anns) =>
+  clearSplits:  (pid)          => API._j(`/api/projects/${pid}/images/clear-splits`, { method: "POST" }),
+  // expectIds: the ids the client last loaded/saved — the server answers 409 if the image holds others
+  saveAnnotations: (pid, iid, anns, expectIds = null) =>
     API._j(`/api/projects/${pid}/images/${iid}/annotations`,
-      { method: "PUT", body: JSON.stringify({ annotations: anns }) }),
+      { method: "PUT", body: JSON.stringify({ annotations: anns, expect_ids: expectIds }) }),
 
   // models / inference
   models:    (pid, task)       => API._j(`/api/models?pid=${pid}&task=${task}`),

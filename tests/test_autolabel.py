@@ -17,6 +17,7 @@ def _fake_predict(model_name, path, task_type, conf, iou, device, db):
 
 def _project_with_image(client):
     pid = client.post("/api/projects", json={"name": "P", "task_type": "detect"}).json()["id"]
+    client.post(f"/api/projects/{pid}/classes", json={"name": "cat"})   # the class _fake_predict returns
     files = [("files", ("a.png", make_png_bytes(100, 100), "image/png"))]
     iid = client.post(f"/api/projects/{pid}/images", files=files).json()["created"][0]["id"]
     return pid, iid
@@ -122,3 +123,22 @@ def test_inference_error_is_logged_not_fatal(client, monkeypatch):
     assert job["images_labeled"] == 0
     assert "a.png" in job["skipped"]
     assert "inference failed" in job["log"]
+
+
+def test_autolabel_never_adds_classes_unless_asked(client, monkeypatch):
+    """A pretrained model (e.g. 80 COCO classes) must not grow the project's class list
+    by default — predictions of classes the project doesn't have are dropped."""
+    from backend.routers import models as models_router
+
+    def dog(*a):
+        return [{"class_name": "dog", "kind": "bbox", "data": {"x": 1, "y": 1, "w": 5, "h": 5}, "confidence": 0.9}]
+    monkeypatch.setattr(models_router.inference, "predict", dog)
+    pid, iid = _project_with_image(client)
+    jid = client.post(f"/api/projects/{pid}/autolabel", json={"model_name": "yolo11n.pt"}).json()["id"]
+    assert client.get(f"/api/projects/{pid}/autolabel/{jid}").json()["annotations_added"] == 0
+    assert [c["name"] for c in client.get(f"/api/projects/{pid}").json()["classes"]] == ["cat"]
+
+    jid = client.post(f"/api/projects/{pid}/autolabel",
+                      json={"model_name": "yolo11n.pt", "create_missing_classes": True}).json()["id"]
+    assert client.get(f"/api/projects/{pid}/autolabel/{jid}").json()["annotations_added"] == 1
+    assert "dog" in [c["name"] for c in client.get(f"/api/projects/{pid}").json()["classes"]]

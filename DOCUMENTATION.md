@@ -145,14 +145,18 @@ already required for YOLO, and is always available.
 
 SQLite via SQLAlchemy 2.0, one global `engine`/`SessionLocal`. `get_db()` is the FastAPI
 dependency every router uses (`Depends(get_db)`), a generator yielding a `Session` and
-closing it after the request.
+closing it after the request. Every connection runs in **WAL** mode with a 30 s busy timeout
+(`_sqlite_pragmas`): readers (job polling, image lists) never block a writer's commit, and a
+writer waits for another instead of failing with "database is locked" after sqlite3's default
+5 s — background jobs, the editor and Review write at the same time. The find-all jobs also
+skip (and log) a single image whose write still fails, instead of ending the whole job.
 
 | Table | Purpose | Notable columns |
 |---|---|---|
 | `Project` | one dataset/task | `task_type`: `detect`\|`segment`\|`classify` — fixed at creation, drives every downstream tool choice |
 | `LabelClass` | a class within a project | `order_idx` (becomes the YOLO class index on export — **keep stable once training starts**), `color` |
 | `ImageAsset` | one uploaded image | `status`: `unannotated`\|`annotated`\|`auto-annotated`\|`review`\|`needs_reannotation`\|`empty`\|`approved` (see §6.3); `split`: `""`\|`train`\|`val`\|`test` — a **manual pin** that `_split_images()` respects before randomizing the rest |
-| `Annotation` | one shape on one image | `kind`: `bbox`\|`polygon`\|`classification`; `data` is a JSON string (`{x,y,w,h}` for bbox, `{points:[[x,y]…]}` for polygon, `{}` for classification); `source`: `manual`\|`model`; `confidence` |
+| `Annotation` | one shape on one image | `kind`: `bbox`\|`polygon`\|`classification`; `data` is a JSON string (`{x,y,w,h}` for bbox, `{points:[[x,y]…]}` for polygon, `{}` for classification); `source`: `manual`\|`model`; `confidence`; `origin`: which tool made a model annotation (`sam`\|`autolabel`\|`bootstrap`, `""` = a person or older rows) |
 | `DatasetVersion` | a frozen, generated snapshot | `config` (the full `VersionCreate` body, JSON), `stats` (output of `exporter.generate()`), `status`: `building`\|`ready`\|`failed` |
 | `ModelWeight` | an uploaded or trained `.pt` | `project_id` nullable = global weight available to all projects; `source`: `uploaded`\|`trained` |
 | `TrainJob` | one training run | `pid` (OS process id of the local worker, used to `stop()`/`refresh_status()`), `status`: `queued`\|`running`\|`done`\|`failed`\|`stopped`, `weights_path` (best.pt once done), `params` (JSON: hyperparameters, plus `mode:"ssh"` + a settings snapshot for SSH runs, or `bootstrap_run`/`bootstrap_round` for Bootstrap — those have `version_id=0`, they train on their own temporary set) |
@@ -215,7 +219,12 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   or `empty`), `predicted_count` = model output nobody has reviewed yet (`auto-annotated`,
   `review`); rejected images count as neither. Deleting a project goes through
   `cleanup.delete_project()` (§3.6), not a bare ORM delete.
-- **`images.py`** — upload accepts a `list[UploadFile]`; unsupported extensions go to
+- **`images.py`** — the image list (`GET …/images`) counts annotations, the lowest model confidence, proposals and
+  uncertainty in grouped queries for the whole project (0.2 s for 5 000 images; per-image loads took 6 s). Upload,
+  zip import and weight upload are plain `def` endpoints (FastAPI runs them in worker threads): as `async def` their
+  synchronous work froze every other request until they finished; the import reads the zip from the upload's
+  temporary file instead of memory (5 000 images: 391 MiB instead of 1.4 GB).
+  Upload accepts a `list[UploadFile]`; unsupported extensions go to
   `skipped` rather than erroring the whole batch. `_img()` is the per-image
   ownership-check helper reused by `annotations.py` and `sam.py`. `serialize_image()` also
   reports `min_conf` (lowest model confidence on the image), `uncertainty` (active-learning
@@ -227,6 +236,13 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   an image (delete-all-then-insert). This is what the editor's autosave calls every time
   you stop drawing for 700ms (see `markDirty()`/`save()` in `app.js`). Also flips
   `image.status` between `annotated`/`unannotated` based on whether the new set is empty.
+  Geometry is validated (`AnnotationIn`: a bbox needs finite x/y and w, h > 0, a polygon ≥ 3 points → 422), and the
+  kind must fit the project: a classify image holds at most one `classification` tag, detect/segment images none.
+  With `expect_ids` (the ids the editor last loaded/saved) the PUT takes the write lock and answers **409**
+  if the image now holds other annotations — a job wrote predictions or another tab saved — and the editor
+  merges instead of silently deleting them. Annotations of a class deleted meanwhile are dropped (reported as
+  `dropped_unknown_class`) instead of refusing the whole save. The response lists the new annotations in the
+  order they were sent, so the editor can take over their (new) ids.
 - **`models.py`** — `/api/models` lists three sources merged into one dropdown: DB-stored
   `ModelWeight` rows (project-specific + global), `PRETRAINED_MODELS` aliases (Ultralytics
   downloads these on first use), and RF-DETR variants if the `rfdetr` package is
@@ -246,7 +262,9 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   annotations only when there are new ones to put in their place**; if the model finds
   nothing (or only classes the project doesn't have) the image keeps its annotations and
   status. `POST /projects/{pid}/active-learning/score` runs the uncertainty ranking as
-  another `AutolabelJob` (writes `ImageScore` rows, no annotations), `GET
+  another `AutolabelJob` (writes `ImageScore` rows, no annotations) over every image nobody
+  has checked yet — unannotated, or holding only unreviewed predictions (`auto-annotated`,
+  `review`), which after a Bootstrap round or find-all is almost all of them. `GET
   /projects/{pid}/active-learning` reports its state. `/system/leaving` and `/system/here`
   are the idle-shutdown handshake (§3.6 `jobs.py`).
 - **`sam.py`** — `GET /api/sam/models` (static capability list), `POST /api/sam/warmup`
@@ -284,9 +302,12 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
 
 - **`storage.py`** — defines the on-disk layout (`data/projects/<pid>/{images,thumbs,versions}`)
   and the one function everything else calls to persist an upload: `save_upload()`.
-  It de-duplicates filenames by appending `_1`, `_2`, … , `exif_transpose()`s the image
-  once at ingest (so rotation metadata never has to be dealt with again downstream), and
-  builds a 320px JPEG thumbnail. Both `importer.py` and the plain upload endpoint funnel
+  It first checks that the bytes are a readable image (nothing is written for a corrupt
+  file), de-duplicates filenames by appending `_1`, `_2`, …, stores an EXIF-rotated photo
+  **upright** (re-encoded once, without the orientation tag, so rotation metadata never has to
+  be dealt with downstream — RF-DETR's PIL loader included), stores formats a browser can't
+  display (TIFF, 16-bit/float images) as 8-bit PNG under `<stem>.png`, and builds a 320px JPEG
+  thumbnail. Both `importer.py` and the plain upload endpoint funnel
   through this single function, so dedup/thumbnailing behavior is consistent everywhere.
 
 - **`sam.py`** *(service)* — SAM 3 in two forms: ultralytics' `SAM` for click/box
@@ -298,9 +319,14 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   on the GPU — `_use(kind)` moves the requested one there and parks the other in CPU RAM
   (`_park()`, ~1 s to swap back vs ~8 s cold), all under one `_gpu_lock` so a request
   can't park a model another request is using. `warmup()` loads both ahead of time,
-  `release_gpu()` parks everything (Bootstrap calls it before training). "Find all" runs
-  on a copy downscaled to 1280 px and retries once at 896 px on CUDA out-of-memory, then
-  fails with a clear message. Masks become polygons in `mask_to_polygons()`
+  `release_gpu()` parks everything (Bootstrap calls it before training). Click/box prompts reuse the image's
+  encoding (`_prompt_cached()`): the first prompt on an image encodes it (~2.2 s for a phone photo on an RTX 4050),
+  every further click on that image takes ~0.03 s (≈0.2 s through the API instead of ~2.7 s); the encoding is
+  dropped when the image or its file changes, on warm-up and when the model is parked. "Find all" decodes
+  a copy downscaled to 1280 px and runs SAM 3 at its native **1008 px** input (`FIND_ALL_IMGSZ`;
+  without an explicit `imgsz` ultralytics used its generic 640 → 644, which lost small objects:
+  on VisDrone 1008 raised F1 .71 → .75 and tiny-object recall .32 → .73); on CUDA out-of-memory it
+  retries once at 644, then fails with a clear message. Masks become polygons in `mask_to_polygons()`
   (`cv2.findContours` + `approxPolyDP`, anything under `min_area=60` dropped).
 
 - **`inference.py`** — the auto-label counterpart to `sam.py`: lazy-cached YOLO/RT-DETR/
@@ -324,8 +350,9 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   that trained weight (e.g. auto-labeling with it later) still detects the family
   correctly — everywhere else `arch` keeps its original untagged value, so this changes
   nothing for existing YOLO weights. `uncertainty()` scores one image for active learning:
-  detection/segmentation use `detection_uncertainty()` (a detection at confidence c is
-  `1 − |2c − 1|` uncertain, the most ambiguous one decides, nothing found = 0.5);
+  detection/segmentation use `detection_uncertainty()` (1 − the mean confidence of the
+  detections ≥ 0.25, nothing found = 0.5 — the earlier "most ambiguous detection decides"
+  saturated on busy images and didn't correlate with model errors);
   classification uses the normalized entropy of the class probabilities. Segment predictions are
   simplified with `simplify_polygon()` (Douglas-Peucker, 0.008 × perimeter — the same as SAM's outlines),
   so a mask outline of hundreds of points becomes an editable polygon of ~10.
@@ -354,7 +381,8 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
     unconditionally so every version is trainable in-platform regardless of
     `config["format"]`. classify tasks always use class-per-folder instead (no format
     choice — `generate()` raises early if `format == "coco"` for a classify project).
-    `config["format"] == "coco"` additionally writes, per split, one flat copy of the
+    `config["format"] == "coco"` names the validation folder `valid/` (Roboflow's convention — RF-DETR reads
+    `valid/_annotations.coco.json`; `data.yaml` then says `val: valid/images`) and additionally writes, per split, one flat copy of the
     images alongside a single `_annotations.coco.json` (`_write_coco_json()`) —
     matching the Roboflow-style layout that pycocotools, HuggingFace `transformers`,
     detectron2, and Roboflow's own `rfdetr` training script all expect out of the box.
@@ -368,20 +396,35 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
 
     Either way, zips the whole version folder and returns stats including `images` (files
     written, augmented copies included), `source_images`/`source_images_total` (distinct
-    images per split, used by the Versions view to show real percentages), and `format`.
+    images per split, used by the Versions view to show real percentages), `format`,
+    `split_ids` (which image went to which split — Test model reads its test images from here,
+    not by re-splitting the project's current images), `skipped` (images or augmented copies
+    that could not be written, with the reason — the Versions list shows a ⚠ pill) and
+    `bad_annotations` (broken shapes left out; one used to drop its whole image silently) and `tiny_dropped`
+    (labels smaller than 4 px² after the resize, which albumentations removes — e.g. 4-px objects in a 2000-px photo
+    resized to 640; shown in the Versions list).
+    `data.yaml` has no `path:` key, so ultralytics resolves the splits next to the file and a
+    downloaded zip trains as-is on another machine.
   - `export_raw(project, approved_only)` — the "just give me a zip" path: no
     `DatasetVersion` row, no split, no preprocessing, no augmentation, **YOLO format
     only** (no format choice here — this is the quick-pack path, not the versioned one).
-    Copies images as-is into `images/`+`labels/` (or class folders), writes `classes.txt`
-    + a minimal `data.yaml`, zips, and deletes its own scratch folder — rebuilt fresh on
-    every request so it always reflects current annotations.
+    Copies images as-is into `images/`+`labels/` (or class folders; a second image with the
+    same stem, e.g. `x.jpg` + `x.png`, becomes `x_<id>` so labels never collide), writes
+    `classes.txt` (also for classification, so a re-import keeps the class order) + a minimal `data.yaml`, zips —
+    each request in its own temporary folder
+    (two downloads at once used to delete each other's files), removed after the response
+    is sent (`remove_export`) — rebuilt fresh on every request so it always reflects
+    current annotations.
 
 - **`importer.py`** — the inverse of `exporter.py`, plus project-to-project merge:
   - `import_zip()` sniffs a `data.yaml`/`classes.txt` for class names, then treats **any**
-    image file in the zip as an entry (matched to a same-stem `.txt` label file by
-    filename only, ignoring folder structure — so both `images/x.jpg`+`labels/x.txt` and
-    nested `train/images/x.jpg`+`train/labels/x.txt` layouts work identically), pins
-    `image.split` from any `train`/`val`/`test` path component it finds. Classes are
+    image file in the zip as an entry, matched to its label file by path first
+    (`…/images/x.jpg` → `…/labels/x.txt`, then a `x.txt` next to the image, then any `x.txt` —
+    the one sharing the most folders — so both `images/x.jpg`+`labels/x.txt` and nested
+    `train/images/x.jpg`+`train/labels/x.txt` layouts work, and `train/x.jpg` never gets
+    `valid/x.txt`), pins `image.split` from any `train`/`val`/`test` path component it finds. A
+    malformed label line is skipped and reported (`label_lines_skipped`, `label_line_errors`)
+    instead of aborting a half-done import. Classes are
     matched **by name** against the target project — same helper
     (`_get_or_create_class`) as autolabel uses, so imports and model predictions
     "just work" against an existing class list without creating duplicates.
@@ -438,8 +481,14 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   → `auto-annotated`. `start()` validates (≥5 labeled images; classify
   needs two classes), builds the training set under `runs/job_<id>/dataset/` — **copies,
   never hard links**, because ultralytics re-saves JPEGs it thinks are corrupt in place —
-  with validation = the training images, picks epochs (`auto_epochs`: 150 for ≤10 images
-  down to 50 for 30+), stores the class-name → id map, and launches the worker. In the
+  with validation = the training images, picks epochs (`auto_epochs`: 300 for ≤15 images,
+  150 for 30, down to 50 for 90+ — on VisDrone the old 100–150 left small-object models
+  under-trained, F1 .38 vs .51) and the batch (`auto_batch`: 8, or 16 from 64 images, halved
+  for every doubling of imgsz above 640), stores the class-name → id map, and launches the worker.
+  Every annotation a model writes records its tool in `Annotation.origin` (`sam`, `autolabel`,
+  `bootstrap`); a round only replaces its own earlier guesses (and pre-origin rows), and keeps
+  predictions made by SAM / Run a model unless `relabel_other_tools` is set — an early round is
+  often worse than SAM. In the
   worker, `track_epochs()` mirrors progress into the row and `label_phase()` deletes the
   copied set, then labels image by image through `_save()`: it writes only if the
   image's status is unchanged since the round picked it (`jobs.claim_image`); a new
@@ -462,7 +511,13 @@ it). None of the routers talk to the ORM beyond simple lookups — all real logi
   nothing runs, or `data/.leave_pending` while a training job, Bootstrap round or
   auto-label/find-all/ranking job runs; `job_finished()` (called when each of those
   ends) turns a pending leave into `.leave_at` once nothing is busy; `cancel_leave()`
-  (behind `/system/here`) removes both. `fail_interrupted_jobs()` runs at startup.
+  (behind `/system/here`) removes both. `fail_interrupted_jobs()` runs at startup and also
+  drops a `.leave_pending` left by a job that died with the old server. Every tab sends
+  `/system/here?tab=<id>` on load and every 20 s, and `/system/leaving?tab=<id>` on close:
+  while another tab has been seen in the last 60 s, leaving arms nothing (closing one of two
+  tabs used to stop the stack). `busy_reason()` refreshes training jobs first, so a dead
+  worker doesn't keep a shutdown pending forever, and `trainer.refresh_status()` calls
+  `job_finished()` when it marks one failed.
 
 - **`cleanup.py`** — `delete_project()`: the ORM cascade only covers images (with their
   annotations, scores, proposals), classes and versions, so this also deletes the
@@ -547,7 +602,7 @@ Views, in rail order:
 - **`viewQuickReview`** — one image at a time: **Accept** (`A`) / **Reject** (`R`) in
   `review` mode, prev/next + revert in `approved` mode. Accept sends the ids of the
   annotations on screen (`expect_annotations`); on a 409 it re-renders the image with
-  the current ones. `S.reviewOnly` (one-shot) confines the queue to given image ids —
+  the current ones. **⏏ Exit** / `Esc` return to the project Home. `S.reviewOnly` (one-shot) confines the queue to given image ids —
   Bootstrap's "Review round N" uses it. Classification annotations show as a class tag.
 - **`viewAnnotate`** — the canvas editor screen; see §4.4/§4.5, this is the largest and
   most stateful view. With no images in the chosen scope it shows "No images to
@@ -647,13 +702,39 @@ re-normalizing when you scroll the wheel).
   anything about the DOM outside its own canvas — a deliberate boundary: `Editor` never
   touches `document.querySelector` for anything but its own canvas element.
 - **Keyboard shortcuts** are handled centrally in `_key()`: `V/B/P/H/S` switch tools,
-  `1-9` picks a class, `Enter` closes a polygon or accepts a pending SAM mask, `Esc`
+  `1-9` and `0` (10th class) pick a class — and label a freshly drawn box that waits for one,
+  `Enter` closes a polygon, accepts a pending SAM mask or labels a waiting box with the active
+  class (drawing the next box does the same instead of dropping it), `Esc`
   clears SAM state or the current draft, `Delete`/`Backspace` removes the selected
   annotation, `E` (SAM tool) asks for every object like the current box
   (`onSamFindAll`). Ctrl-click toggles a pending SAM result off/on.
+- **Picking and limits** — a click selects the **smallest** shape under the cursor (a selected one under
+  it stays selected so it can be dragged; **Alt-click** cycles through a stack) — on dense images
+  "the last one drawn" left a third of the boxes unselectable. A drag reports its change once, on
+  mouseup (not per mousemove), and selecting only moves the list highlight. Boxes are clipped to the
+  image on every side; a drag of more than 4 *screen* pixels makes a box (1–4 px objects at high
+  zoom); inside a box smaller than 24 screen px a drag moves it instead of grabbing a handle. A window
+  resize keeps zoom and pan (`_resize()`); only a new image fits. The 2nd mousedown of a double-click
+  doesn't add a polygon point twice.
+- **Undo / redo** — `checkpoint()` stores a JSON snapshot of `anns` just before a change (the editor's own
+  gestures call it, and so does `app.js` before every edit it makes: accepting SAM results, class changes,
+  deletes from the list, *Mark empty*); a drag or click that changed nothing removes its step again
+  (`_dropIfUnchanged`). `undo()`/`redo()` restore a snapshot and go through `onChange`, so the result is
+  autosaved; while a polygon is being drawn, `undo()` removes its last point. `load(img, anns, key)` keeps
+  a history per image key (≤ 100 steps) for the life of the editor; `onHistory` updates the ↶/↷ buttons.
+  Keys: `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`, `Ctrl/Cmd+Y`; other `Ctrl` combinations go to the browser.
 - **Walkthrough drawing** — `_drawSam()` also draws the "find all" walkthrough state set
   by `app.js`: the result under review (`r.cur`) with a yellow glow, labeled results in
   their class colour (`r.color`/`r.label`), the rest dimmed.
+
+**Autosave (`viewAnnotate`)** — edits are saved 700 ms after the last change through one save at a
+time; an edit made while a save is in flight is sent right after it (`editGen`), and only a save
+that covered every edit shows "saved". `go()` / Exit / the rail first save and **stay** on the image
+if the server didn't take it (the save keeps retrying every 5 s); closing the tab with unsaved
+changes asks first and sends them with a `keepalive` request. Saves carry `expect_ids`; on a 409 the
+editor merges (keeps the user's edits, adds what appeared elsewhere, accepts remote deletions only
+of annotations the user didn't touch) and saves again. A SAM answer that arrives after the user
+moved to another image is dropped; clicks made while SAM is busy are sent once it answers.
 
 ### 4.5 SAM-assist flow (frontend half)
 
@@ -727,8 +808,15 @@ including the actual `uvicorn` process and the optional weight preload.
 `--profile cpu`), both binding `127.0.0.1:8811` only (not reachable from the LAN unless
 you deliberately change that), both mounting `./data` and `./seg_models`.
 `PRELOAD_MODELS` is a space-separated list of Ultralytics asset names downloaded once at
-first boot (`start.sh` → `attempt_download_asset`); set it to `""` to stay fully
+first boot (`start.sh` → `attempt_download_asset`, default `sam3.pt yolo11n.pt yolo26n.pt` —
+the last one is what ultralytics' AMP check loads before GPU training); `start.sh` also fetches
+the `Arial.ttf` font every training's dataset check wants. Pretrained aliases always resolve to
+`data/models/<alias>` (`inference.alias_path()`), so preloaded files are used offline and missing
+ones download there — not into the container layer. Set `PRELOAD_MODELS` to `""` to stay fully
 air-gapped and upload `.pt` files through the UI instead.
+Run commands inside the container as the app user — `docker compose exec -u yaap yaap …` — a root
+`exec` creates root-owned files in the bind-mounted `data/` (training then falls back to a private
+config folder, `trainer.worker_env()`, and says so in its log).
 
 Additions for the newer features:
 - Both images install `openssh-client`, `rsync` and `git` (SSH training; `git` because

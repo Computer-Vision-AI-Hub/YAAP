@@ -1,0 +1,223 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>editor-fixes</title>
+<script src="harness.js"></script>
+<script>
+// Regression checks for the editor bugs found by the VisDrone end-to-end test (2026-11-08):
+// autosave races and failures, merging changes made elsewhere, class keys, box picking/clipping,
+// resize, double-click, late SAM answers, Approve/Reject toggles, Quick Review double key presses.
+test(async t => {
+  const classes = Array.from({ length: 10 }, (_, i) => ({ id: i + 1, name: `c${i + 1}`, color: "#f00" }));
+  const PROJECT = { id: 1, name: "P", task_type: "detect", image_count: 3, annotated_count: 0, classes };
+  const IMAGES = [1, 2, 3].map(id => ({ id, filename: `i${id}.png`, width: 100, height: 100,
+    status: "unannotated", annotation_count: 0, split: "" }));
+  const server = { 1: [], 2: [], 3: [] };      // what the mock server holds per image
+  let nextId = 100, putMode = "ok", putDelay = 0, samDelay = 0, imagesDelay = 0;
+  const puts = [], samBodies = [];
+  await t.boot({ routes: [
+    ["GET", /\/api\/projects$/, () => []],
+    ["GET", /\/api\/projects\/1$/, () => PROJECT],
+    ["GET", /\/images$/, async () => { if (imagesDelay) await t.sleep(imagesDelay); return IMAGES.map(x => ({ ...x })); }],
+    ["GET", /\/images\/(\d+)\/annotations$/, url => server[+url.match(/images\/(\d+)\//)[1]].map(a => ({ ...a }))],
+    ["PUT", /\/images\/(\d+)\/annotations$/, async (url, body) => {
+      const iid = +url.match(/images\/(\d+)\//)[1];
+      puts.push({ iid, n: body.annotations.length, expect: body.expect_ids });
+      if (putDelay) await t.sleep(putDelay);
+      if (putMode === "fail") return { __status: 500, detail: "server down" };
+      const ids = server[iid].map(a => a.id).sort().join();
+      if (body.expect_ids && body.expect_ids.slice().sort().join() !== ids)
+        return { __status: 409, detail: "changed elsewhere" };
+      server[iid] = body.annotations.map(a => ({ ...a, id: nextId++ }));
+      return { annotations: server[iid], status: server[iid].length ? "annotated" : "unannotated", dropped_unknown_class: 0 };
+    }],
+    ["PATCH", /\/images\/(\d+)$/, (url, body) => {
+      const iid = +url.match(/images\/(\d+)$/)[1];
+      const status = body.status === "annotated" && !server[iid].length ? "unannotated" : body.status;
+      return { ...IMAGES.find(x => x.id === iid), status };
+    }],
+    ["POST", /\/images\/\d+\/sam$/, async (url, body) => { samBodies.push(body); await t.sleep(samDelay); return { results: [
+      { polygon: [[5, 5], [20, 5], [20, 20]], bbox: { x: 5, y: 5, w: 15, h: 15 }, score: 0.9, label: "" }] }; }],
+    ["POST", /\/sam\/warmup$/, () => ({ ok: true })],
+    ["GET", /\/sam\/models$/, () => ({ models: [{ name: "sam3.pt", label: "SAM 3" }], ultralytics: true })],
+  ] });
+
+  const at = (ed, ix, iy, extra = {}) => {
+    const r = ed.cv.getBoundingClientRect(), [sx, sy] = ed.toScr(ix, iy);
+    return { clientX: r.left + sx, clientY: r.top + sy, button: 0, detail: 1, ...extra };
+  };
+  const drag = (ed, x0, y0, x1, y1) => { ed._down(at(ed, x0, y0)); ed._move(at(ed, x1, y1)); ed._up(); };
+  // from an element, like a real key press (the editor ignores keys typed into inputs: it checks e.target)
+  const press = (key, extra = {}) => document.body.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...extra }));
+  const open = async (i = 0) => { S.curImage = i; await t.go("#/p/1/classes", 50); await t.go("#/p/1/annotate", 250); return S.editor; };
+
+  // ── annotator-10 / -22: keys label the box that waits for its class; 0 = the 10th class
+  let ed = await open(0);
+  ed.setTool("bbox");
+  drag(ed, 10, 10, 30, 30); press("2");
+  t.check("digit labels the waiting box", ed.anns.length === 1 && ed.anns[0].class_id === 2, ed.anns);
+  drag(ed, 40, 40, 60, 60); press("0");
+  t.check("0 picks the 10th class", ed.anns.length === 2 && ed.anns[1].class_id === 10, ed.anns.map(a => a.class_id));
+  drag(ed, 5, 60, 20, 80); press("Enter");
+  t.check("Enter labels it with the active class", ed.anns.length === 3 && ed.anns[2].class_id === 10);
+  drag(ed, 70, 5, 90, 20); drag(ed, 70, 70, 90, 90);
+  t.check("drawing the next box keeps the unlabeled one (active class)", ed.anns.length === 4 && !!ed.pendingShape,
+    { n: ed.anns.length, pending: !!ed.pendingShape });
+  press("Escape");
+
+  // ── annotator-1: an edit made while a save is in flight is saved too
+  await t.sleep(900);                                    // let the debounced save of the 4 boxes finish
+  puts.length = 0; putDelay = 400;
+  drag(ed, 50, 5, 65, 15); press("1");                   // box 5 → save starts after 700 ms
+  await t.sleep(800);
+  drag(ed, 50, 80, 65, 95); press("1");                  // box 6, while that PUT is still running
+  await t.sleep(2000);
+  putDelay = 0;
+  t.check("edit made during an in-flight save reaches the server", server[1].length === 6 && ed.anns.length === 6,
+    { server: server[1].length, editor: ed.anns.length, puts });
+  t.check("…and the UI says saved", document.querySelector("#saveState").textContent === "saved");
+
+  // ── annotator-2: a failed save keeps you on the image; nothing untouched gets rewritten
+  putMode = "fail"; puts.length = 0;
+  drag(ed, 20, 40, 35, 55); press("1");
+  await t.sleep(800);
+  document.querySelector("#nextImg").click(); await t.sleep(300);
+  t.check("failed save: still on the same image", S.curImage === 0 && S.editor === ed, S.curImage);
+  t.check("failed save: an error is shown", !!document.querySelector(".toast.err"));
+  putMode = "ok";
+  document.querySelector("#nextImg").click(); await t.sleep(400);
+  t.check("once the server is back the edit is saved and Next works", server[1].length === 7 && S.curImage === 1,
+    { server: server[1].length, cur: S.curImage });
+  puts.length = 0;
+  document.querySelector("#nextImg").click(); await t.sleep(400);
+  t.check("an image that was only viewed is never written", !puts.some(p => p.iid === 2), puts);
+
+  // ── annotator-6 / -13: changes made elsewhere are merged, not deleted
+  server[3] = [{ id: 1, class_id: 1, kind: "bbox", data: { x: 1, y: 1, w: 10, h: 10 }, source: "manual", confidence: 1 }];
+  ed = await open(2);
+  ed.setTool("bbox");
+  drag(ed, 50, 50, 70, 70); press("1");                  // the user adds a box …
+  server[3].push({ id: 50, class_id: 2, kind: "bbox", data: { x: 80, y: 80, w: 10, h: 10 },   // … a job adds one
+                   source: "model", confidence: 0.8, origin: "sam" });
+  await t.sleep(1200);
+  const kinds = server[3].map(a => `${a.class_id}@${a.data.x}`).sort().join();
+  t.check("a job's prediction survives a stale editor save", kinds === "1@1,1@50,2@80", kinds);
+  t.check("…and shows up in the editor", ed.anns.length === 3, ed.anns.length);
+
+  // ── annotator-4: the smallest box under the cursor is picked; Alt-click cycles
+  ed.load(ed.img, [
+    { id: 7, class_id: 1, kind: "bbox", data: { x: 20, y: 20, w: 10, h: 10 } },
+    { id: 8, class_id: 1, kind: "bbox", data: { x: 0, y: 0, w: 80, h: 80 } }], 3);
+  ed.setTool("select");
+  ed._down(at(ed, 25, 25)); ed._up();
+  t.check("click picks the small box, not the one drawn last", ed.sel === 0, ed.sel);
+  ed._down(at(ed, 25, 25, { altKey: true })); ed._up();
+  t.check("Alt-click cycles to the box underneath", ed.sel === 1, ed.sel);
+
+  // ── annotator-3: a drag reports the change once, and selecting doesn't rebuild the list
+  let changes = 0;
+  const realChange = ed.opts.onChange;
+  ed.opts.onChange = () => { changes++; realChange(); };
+  ed.select(0);
+  ed._down(at(ed, 25, 25)); for (let k = 1; k <= 10; k++) ed._move(at(ed, 25 + k, 25 + k)); ed._up();
+  ed.opts.onChange = realChange;
+  t.check("a drag of 10 mousemoves is one change", changes === 1, changes);
+  const row0 = document.querySelector('#edAnns .ed-ann[data-i="0"]');
+  ed.select(1);
+  t.check("selecting just moves the highlight", row0.isConnected &&
+    document.querySelector('#edAnns .ed-ann[data-i="1"]').classList.contains("sel"));
+
+  // ── annotator-8 / -20: clipping at the left/top edge, tiny objects at high zoom
+  ed.load(ed.img, [], 3);
+  ed.setTool("bbox");
+  drag(ed, -20, -10, 40, 30);
+  t.check("box dragged from outside the left/top edge is clipped, not widened",
+    ed.pendingShape && ed.pendingShape.data.x === 0 && Math.round(ed.pendingShape.data.w) === 40 &&
+    Math.round(ed.pendingShape.data.h) === 30,
+    ed.pendingShape?.data);
+  press("Escape");
+  ed.view.s = 16; ed.view.tx = 0; ed.view.ty = 0;
+  drag(ed, 2, 2, 5, 5);
+  t.check("a 3 px object can be boxed at 16× zoom", ed.pendingShape && Math.round(ed.pendingShape.data.w) === 3, ed.pendingShape?.data);
+  press("Escape");
+
+  // ── annotator-14: a resize keeps the zoom
+  ed.view.s = 3;
+  const wrap = ed.cv.parentElement, oldW = wrap.style.width;
+  wrap.style.width = (wrap.getBoundingClientRect().width - 40) + "px";
+  await t.sleep(100);
+  t.check("resizing keeps the zoom", ed.view.s === 3, ed.view.s);
+  wrap.style.width = oldW; await t.sleep(50);
+
+  // ── annotator-18: double-click closes a polygon without a duplicate last point
+  ed.fit(); ed.setTool("polygon");
+  ed._down(at(ed, 10, 10)); ed._up(); ed._down(at(ed, 50, 10)); ed._up();
+  ed._down(at(ed, 50, 50)); ed._up(); ed._down(at(ed, 50, 50, { detail: 2 })); ed._up();
+  ed.cv.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  t.check("double-click closes with 3 points", ed.pendingShape?.data.points.length === 3, ed.pendingShape?.data.points);
+  press("Escape");
+
+  // ── annotator-11: clicks made while SAM is busy are sent once it answers
+  ed.setTool("sam"); samDelay = 200; samBodies.length = 0;
+  ed._down(at(ed, 10, 10)); ed._up(); await t.sleep(30);
+  ed._down(at(ed, 15, 15)); ed._up(); await t.sleep(700);
+  t.check("a 2nd click during a SAM request is sent after it", samBodies.length === 2 &&
+    samBodies[1].prompt.points.length === 2, samBodies.map(b => b.prompt.points?.length));
+  ed.clearSam(); samDelay = 0;
+
+  // ── annotator-9: the class picker stays inside the canvas for a box at the top edge
+  ed.setTool("bbox");
+  drag(ed, 40, 0, 60, 3);
+  const pick = document.querySelector("#samLabelPick").getBoundingClientRect(),
+        canvasBox = ed.cv.parentElement.getBoundingClientRect();
+  t.check("class picker for a box at the top is fully visible", pick.top >= canvasBox.top && pick.height > 0,
+    { pick: pick.top, wrap: canvasBox.top });
+  press("Escape");
+
+  // ── annotator-5: a SAM answer that arrives after → is dropped
+  ed.setTool("sam"); samDelay = 300;
+  ed._down(at(ed, 10, 10)); ed._up();                    // click → prompt runs (slow)
+  await t.sleep(50);
+  document.querySelector("#prevImg").click(); await t.sleep(600);
+  t.check("late SAM answer is not shown on the next image", S.editor.samPending.length === 0 && S.curImage === 1,
+    { pending: S.editor.samPending.length, cur: S.curImage });
+  samDelay = 0;
+
+  // ── annotator-7 / -17: Approve on an image without labels, clicked twice, ends where it started
+  ed = await open(1);
+  const ap = document.querySelector("#edApprove");
+  ap.click(); ap.click(); await t.sleep(100);           // the second click is ignored while the first runs
+  t.check("double-click on Approve: one request, approved", S.images[1].status === "approved", S.images[1].status);
+  ap.click(); await t.sleep(100);
+  t.check("clearing the approval of an empty image → unannotated", S.images[1].status === "unannotated", S.images[1].status);
+
+  // ── annotator-15: a view whose data arrives late doesn't paint over the view the user went to
+  imagesDelay = 300;
+  location.hash = "#/p/1/review"; await t.sleep(50);
+  location.hash = "#/p/1/classes"; await t.sleep(600);
+  imagesDelay = 0;
+  t.check("late Review data doesn't replace Classes", /Classes/.test(document.querySelector("#stage h1")?.textContent || ""),
+    document.querySelector("#stage h1")?.textContent);
+
+  // ── annotator-23: the empty annotator goes back to the project Home
+  S.annotateScope = "needs_reannotation"; await t.go("#/p/1/classes", 50); await t.go("#/p/1/annotate", 250);
+  const back = [...document.querySelectorAll("#stage button")].find(b => /Return to Home/.test(b.textContent));
+  back?.click(); await t.sleep(100);
+  t.check("Return to Home → project Home", location.hash === "#/p/1/review", location.hash);
+
+  // ── classification projects: the editor opens (it crashed on the missing ↶ button), clicks and keys tag
+  PROJECT.task_type = "classify";
+  server[1] = [];
+  ed = await open(0);
+  const big = [...document.querySelectorAll("#clsPanel .cls-big")];
+  t.check("classify editor opens with one button per class", big.length === 10 && !!S.editor.img, big.length);
+  puts.length = 0;
+  big[1].click(); await t.sleep(900);
+  t.check("a click tags the image", server[1].length === 1 && server[1][0].kind === "classification" &&
+    server[1][0].class_id === 2, server[1]);
+  press("4"); await t.sleep(900);
+  t.check("key 4 re-tags it as the 4th class (one tag)", server[1].length === 1 && server[1][0].class_id === 4, server[1]);
+  press("z", { ctrlKey: true }); await t.sleep(900);
+  t.check("Ctrl+Z goes back to the previous class", server[1].length === 1 && server[1][0].class_id === 2, server[1]);
+  PROJECT.task_type = "detect";
+});
+</script>

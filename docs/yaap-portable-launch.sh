@@ -85,7 +85,7 @@ services:
     restart: unless-stopped
     shm_size: "8gb"
     environment:
-      PRELOAD_MODELS: "yolo11n.pt"
+      PRELOAD_MODELS: "yolo11n.pt yolo26n.pt"
       YOLO_CONFIG_DIR: /tmp/Ultralytics
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -110,7 +110,7 @@ services:
       - $YAAP_HOME/seg_models:/app/seg_models
     restart: unless-stopped
     environment:
-      PRELOAD_MODELS: "yolo11n.pt"
+      PRELOAD_MODELS: "yolo11n.pt yolo26n.pt"
       YOLO_CONFIG_DIR: /tmp/Ultralytics
 EOF
   fi
